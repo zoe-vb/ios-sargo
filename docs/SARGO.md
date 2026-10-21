@@ -62,6 +62,24 @@ CMD0..7) at the 384 MHz base with the SDHCI divider, 1-bit legacy speed first; d
 only; the SDCC1 stream needs no SMMU programming (bypass). Faster modes (8-bit, HS52/DDR,
 HS200 with tuning) and the exact userdata range are still open.
 
+## First XNU boot (2026-10-21, x01..x03)
+
+Kernel: CI artifact `xnu-kernel/kernel.development.sweet` (xnu-8796.141.3, built 2026-10-18,
+SHA256 d9cb893b..., unmodified sweet kernel), ADT `mkadt.py --board sargo`, cmdline
+`debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0`, no ramdisk.
+Safe on sargo because every hard-coded sweet driver (touch, keys, USB, SPMI, RPMh) is only
+started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
+
+- x01/x02: payload as the ABL ramdisk (16.6 MB): the phone resets into off-mode charging.
+  ABL loads the ramdisk at `0x84700000`; stock DTB `hyp_region` starts at `0x85700000`, 16 MiB
+  later; the payload ended 167 KB short of it. (Not proven which access faults; moving it fixed it.)
+- x03: payload appended to the shim Image (`EMBED=1`, image_size covers it), 6 MB boot.img,
+  `Booting OKAY` after 7.7 s. **XNU boots**: VM bootstrap, zones in the high bank, clutch
+  scheduler, IPC, PRNG, pthread, AMFI, vnguard, device-tree platform expert, AKS, WDT,
+  IOSurface root, HID buttons/touch services, battery fallback, and
+  `SWEET FB: AppleCLCD 1080x2220 stride 4320 at 0x9c000000, presented as 1125x2436`.
+  Photo shows the console up to that line; end state (root wait / panic) not yet observed.
+
 ## Stage plan
 
 1. **Shim stage 1** (`BOARD=sargo shim/build.sh`): boots via `fastboot boot`, draws on

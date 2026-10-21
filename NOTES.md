@@ -22,7 +22,14 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   boots (commits 994fc99..ff626aa): **ADMA2 block reads work** (EXT_CSD + GPT, userdata found, user-reported;
   no photo of the final numbers). PIO is broken on this msm wrapper (buffer port never advances). Details and
   driver conclusions: docs/SARGO.md "eMMC bring-up in the shim".
-- Next: XNU stage 2 (ramdisk root, no storage) needs a kernel: this Mac has no `xnu/out/` and no `gh`; kernels
+- **XNU boots on sargo (x03, 2026-10-21 night)**: unmodified sweet CI kernel + sargo ADT, payload embedded in
+  the shim Image (ABL's ramdisk slot is only 16 MiB below hyp_region; the 16.6 MB ramdisk payload reset the SoC).
+  Console reaches IOKit platform expert and `SWEET FB: AppleCLCD 1080x2220`. Build:
+  `python3 tools/mkadt.py shim/out/sargo/sargo-x01.adt --board sargo && python3 tools/mkpayload.py
+  xnu-kernel/kernel.development.sweet shim/out/sargo/sargo-x01.adt shim/out/sargo/payload-x01.bin --cmdline
+  "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0" && PATH=/opt/local/bin:$PATH BOARD=sargo
+  LLVM=1 shim/build.sh ../shim/out/sargo/payload-x01.bin`. Details: docs/SARGO.md "First XNU boot".
+- Older note (kernel now available in xnu-kernel/, gitignored): XNU stage 2 needed a kernel: this Mac has no `xnu/out/` and no `gh`; kernels
   build on GitHub Actions (`.github/workflows/xnu.yml`). Then an XNU sdhc driver (port of shim/emmc.c to the
   sweet_ufs.c block interface).
 
