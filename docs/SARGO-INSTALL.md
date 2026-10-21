@@ -151,6 +151,11 @@ roughly 10–15 minutes; do not unplug. This touches `userdata` only.
 **4a booted 2026-10-21 23:46 as x13**: 0085 kernel + `sargo-x13.adt` (with `/product`), cmdline
 `... rd=sdhcroot0 sdhcprobe=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin
 launchd_unsecure_cache=1 wdt=-1` (no sdhcrw/sdhcwtest/rootrw, checked in the payload): Booting OKAY.
+**Result (photo IMG_0045, off git): the iOS root mounts and runs from the eMMC.** Panic
+`mount[3] exited -- no exit reason available -- (signal 0, exit status 1)`, panicked task pid 3
+`mount`; panic header `OS release type: User`, `OS version: 20H392` (read from the mounted root's
+SystemVersion.plist). = the expected read-only stop: launchd ran iOS's /sbin/mount, whose
+read-write remount of / cannot succeed without rootrw (same as sweet boot 0036).
 
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
