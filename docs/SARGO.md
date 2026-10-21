@@ -139,6 +139,9 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   (~2.9 MB/s, 1-bit legacy speed). Then `BSD root: md0` and PID 1 as in x09. Nothing was written.
 - Patch 0084 (`2449cc1`, CI 39682469923, `xnu-kernel-0084/`): 8-bit + HS52 with per-step EXT_CSD verify
   and fallback (`sdhcspeed=`, default 2), probe times a 4 MiB read. x11 = x10 with this kernel: Booting OKAY.
+  **Result (user report): 4 MiB read at 36796 KiB/s** (x10, 1-bit legacy: ~2900 KiB/s), i.e. ~77% of
+  the 8-bit 48 MHz bus (384 MHz / 8) with one 32 KiB ADMA command at a time and polled completion.
+  Not separately confirmed: the exact `bus ...` line (no photo).
 - Next for storage (before 0084): faster bus (CMD6 to 8-bit + HS52/DDR52, volatile EXT_CSD settings; HS200/HS400
   need tuning), larger transfers (several ADMA descriptors once the 12/16-byte descriptor size is
   confirmed), then a write path (needed for the iOS root) and installing the HFS+ root into userdata
