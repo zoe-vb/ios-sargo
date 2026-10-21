@@ -8,6 +8,7 @@
  * and caches off, x0 = boot_args (physical).
  */
 #include <stdint.h>
+#include "board.h"
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
@@ -76,6 +77,43 @@ static int magic_ok(const char *m)
 
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
+#ifndef BOARD_SWEET
+static uint64_t now(void)
+{
+	uint64_t v;
+	__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(v));
+	return v;
+}
+
+static void pause_ms(unsigned ms)
+{
+	uint64_t end = now() + (uint64_t)ms * 19200;
+	while (now() < end)
+		;
+}
+
+/*
+ * New board: write + read back one word every 16 MB of the RAM xnu gets,
+ * before copying anything there. A TrustZone-protected range resets the
+ * SoC on the first access, so the last line on screen names the culprit.
+ */
+static int probe_ram(uint64_t base, uint64_t size)
+{
+	int bad = 0;
+	for (uint64_t off = 0; off < size; off += 0x1000000) {
+		volatile uint64_t *p = (volatile uint64_t *)(base + off);
+		if ((off & 0xfffffff) == 0)
+			con_hex2("PROBE", "at=", (uint32_t)((base + off) >> 12), "(4K) of=", (uint32_t)(size >> 20));
+		uint64_t keep = *p;
+		*p = 0x5357454554000000ULL | off;
+		if (*p != (0x5357454554000000ULL | off))
+			bad++;
+		*p = keep;
+	}
+	return bad;
+}
+#endif
+
 const char *loader_boot(uintptr_t dtb)
 {
 	uint64_t rd_start, rd_end;
@@ -100,8 +138,17 @@ const char *loader_boot(uintptr_t dtb)
 	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
 		return "ramdisk overlaps kernel memory";
 
+#ifndef BOARD_SWEET
+	int bad = probe_ram(p->phys_base, p->mem_size);
+	con_hex2("PROBE", "done bad=", bad, "MiB=", (uint32_t)(p->mem_size >> 20));
+	if (bad)
+		return "RAM probe mismatch";
+#endif
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
+#ifndef BOARD_SWEET
+		con_hex2(" seg", "pa=", (uint32_t)((s->vmaddr + pa_of_va_base) >> 12), "KiB=", (uint32_t)(s->vmsize >> 10));
+#endif
 		uintptr_t dst = s->vmaddr + pa_of_va_base;
 		copy64(dst, rd_start + s->file_off, s->file_size);
 		if (s->vmsize > s->file_size)
@@ -139,6 +186,9 @@ const char *loader_boot(uintptr_t dtb)
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
+#ifndef BOARD_SWEET
+	pause_ms(3000);	/* time to photograph the screen above */
+#endif
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
