@@ -89,6 +89,15 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   (iOS builds only with `-progress`), RTC code (none), hard-coded sweet MMIO before this point.
 - x05 = x04 + `-noprogress io=0xd` (IOKit attach/start/register trace): does a driver `start()`
   hang (last line names it) or does IOKit go quiet (boot thread stuck in a timed wait)?
+- x05 result: every IOKit start returns (`<1>`): resources (AKS, WDT, surface root, HID, battery),
+  platform-expert nubs (arm-io, sweet-fbcon, buttons, pram, sweet-sdhc@7C4000, wdt, disp0, cpu0..7),
+  IOPanicPlatform, AppleCLCD; then IOKit is quiet. -> the BSD boot thread is stuck.
+  XNU's timer code is standard (CNTV_TVAL relative + CNTVCT, IRQ dispatch on the ADT INTID 19),
+  so a CNTVOFF offset cannot matter.
+- x06 = x05 with a binary-patched kernel copy (`shim/out/sargo/kernel-x06`): the
+  `bl IOService::waitForService` in `IOKitInitializeTime` (VA 0xfffffe00079abf90, file offset
+  0x9a7f90, `0x94005459`) replaced by `nop`, i.e. no 30 s IORTC wait. Getting further means timed
+  waits (timer deadlines) are what hangs.
 
 ## Stage plan
 
