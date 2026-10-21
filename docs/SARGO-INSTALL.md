@@ -84,8 +84,18 @@ Check: CI builds, syntax and bounds logic reviewed. No boot with `sdhcrw=1` yet.
 
 ### 2. Build the iOS root image on this Mac (no phone writes)
 
-`tools/mkiosroot.sh` is Linux-only (`apfs-fuse`, `hfsprogs`). macOS can do it
-natively; a `tools/mkiosroot-mac.sh` would:
+`tools/mkiosroot.sh` is Linux-only (`apfs-fuse`, `hfsprogs`). macOS does it
+natively with **`tools/mkiosroot-mac.sh`** (written; its hdiutil steps tested on
+small images: APFS UDIF and raw attach, case-sensitive journaled HFS+ with owners,
+`fsck_hfs` clean, raw output starting with the HFSX signature). It needs MacPorts
+`rsync` 3.x (`sudo port install rsync`; Apple's openrsync lacks what `-H` needs)
+and runs as root:
+
+```sh
+sudo tools/mkiosroot-mac.sh OS.dmg SystemOS.dmg AppOS.dmg ios16-root-sargo.img 16g
+```
+
+What it does:
 
 1. `hdiutil attach` the IPSW's OS, SystemOS and AppOS images (APFS, read-only;
    macOS decompresses transparently)
