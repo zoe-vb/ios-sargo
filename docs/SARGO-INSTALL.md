@@ -189,6 +189,12 @@ recur: intermittent, cause unknown. Later: bluetoothd / fairplayd.H2 / xpcproxy 
 as sweet) and the kernel console overwrote the logo (AppleCLCD copies frames only on swaps).
 x16 = x15 + `sweetfb_noconsole=1 sweetfb_hz=30 sweetsample=-` (console muted from iOS's first
 frame; panics still draw) to see whether the GUI comes up.
+**x16 result:** stopped at `exec cc_fips_test` (an earlier boot task than before; console still
+live, iOS never drew a frame). Stops so far: x14 dirs_cleaner, x14 launchd_cache_loader, x15 none
+(logo), x16 cc_fips_test -> a system-wide intermittent stall on cpus=1, not one process (kernel
+alive: heartbeat). Suspects: a lock/I/O wait that never completes (new eMMC driver, HFS journal)
+or a high-priority kernel thread spinning. x17 = x15 config with
+`sweetsample=cc_fips_test,keybagd,usermanagerd,dirs_cleaner,launchd_cache_loader,launchd`.
 
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
