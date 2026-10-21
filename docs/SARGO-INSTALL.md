@@ -161,6 +161,14 @@ read-write remount of / cannot succeed without rootrw (same as sweet boot 0036).
 x13 + `sdhcrw=1 sdhcwtest=1`, still no `rootrw` (root mounted read-only; iOS's `mount -u`
 may now remount it read-write since the device accepts writes). The driver's partition-bounds
 guard still applies to every write. Booting OKAY.
+**x14 result (photo IMG_0047, off git):** mount succeeded this time (no `mount[3]` panic):
+usermanagerd `UMD_INIT ... DONE EARLYBOOT SETUP`, `***** DONE UMD_INIT *****`, then
+`launchd[1] (dirs_cleaner) Doing boot task`, `exec dirs_cleaner` and nothing more for many
+minutes while the timer heartbeat keeps changing. Boot tasks run one at a time, so dirs_cleaner
+has not exited (its strings: removefile() on a worker thread + pthread_cond_timedwait; uses
+renamex_np RENAME_SWAP). The write test lines were not photographed.
+Patch 0086 (`51f0816`, CI 39690982704): sampler with kernel wait info, started by the eMMC driver;
+next boot x15 = x14 + `sweetsample=dirs_cleaner,launchd`.
 
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
