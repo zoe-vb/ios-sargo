@@ -7,6 +7,11 @@
  * CMD0/1/2/3/9/7, EXT_CSD (CMD8), GPT header + entries (CMD17).
  * No CMD6 and no writes: nothing on the card changes.
  *
+ * Boot 2 (2026-10-21) hung on CMD9 with no status bit at all: ABL leaves
+ * the SDCC1 apps clock very slow (its deinit probably selects the 400 kHz
+ * ident rate), and our /2046 ident divider made the bus ~200 Hz. Like
+ * Linux sdhci-msm, set the rate at the GCC RCG and divide little.
+ *
  * MMU off: all accesses are aligned 32-bit (Device memory).
  */
 #include <stdint.h>
@@ -64,6 +69,13 @@
 #define R3			RSP_48
 #define XFER_READ		(1U << 4)
 
+/* GCC (sdm845/sdm670 gcc driver): SDCC1 apps RCG and branch */
+#define GCC_BASE		0x00100000UL
+#define SDCC1_APPS_CBCR		(GCC_BASE + 0x26004)
+#define SDCC1_APPS_RCGR		(GCC_BASE + 0x26028)	/* CMD; CFG +4, M +8, N +0xc, D +0x10 */
+#define RCG_UPDATE		(1U << 0)
+#define RCG_ROOT_OFF		(1U << 31)
+
 #define OCR_BUSY		(1U << 31)
 #define OCR_SECTOR_MODE		0x40000000U
 #define OCR_VOLTAGES		0x00ff8080U	/* 2.7-3.6 V + 1.70-1.95 V */
@@ -92,11 +104,72 @@ static void mdelay(unsigned ms)
 #define H	SDHC1_BASE
 
 static uint32_t last_int;
+static uint64_t last_ticks;	/* duration of the last cmd() */
+static uint32_t base_khz;	/* SDCC1 apps clock = SDHCI base clock */
 static uint32_t blk[128];	/* one 512-byte block */
 
-/* <= 400 kHz for identification, then legacy speed (<= 26 MHz) */
-#define DIV_IDENT		1023	/* f = base / (2 * N) */
-#define DIV_XFER		8	/* <= 24 MHz even if ABL left 384 MHz (HS400) */
+/* SDHCI 3.0 divided clock: f = base / (2N), N = 1..1023 (0 = undivided) */
+static unsigned div_for(uint32_t khz)
+{
+	unsigned n = (base_khz + 2 * khz - 1) / (2 * khz);
+	if (base_khz <= khz)
+		return 0;
+	return n > 1023 ? 1023 : n;
+}
+
+static uint32_t parent_khz(unsigned src)
+{
+	switch (src) {
+	case 0: return 19200;	/* bi_tcxo */
+	case 1: return 600000;	/* gpll0 main */
+	case 2: return 384000;	/* gpll6 main */
+	case 6: return 300000;	/* gpll0 out even */
+	default: return 0;
+	}
+}
+
+/* rate of the RCG as programmed (clk-rcg2: hid div = 2*div-1, N stored as ~(n-m)) */
+static uint32_t rcg_khz(void)
+{
+	uint32_t cfg = rd32(SDCC1_APPS_RCGR + 4);
+	uint32_t p = parent_khz(cfg >> 8 & 7);
+	uint32_t hid = cfg & 0x1f;
+	uint64_t r = hid ? (uint64_t)p * 2 / (hid + 1) : p;
+	if ((cfg >> 12 & 3) == 2) {	/* dual-edge M/N */
+		uint32_t m = rd32(SDCC1_APPS_RCGR + 8) & 0xff;
+		uint32_t n = ((~rd32(SDCC1_APPS_RCGR + 12)) & 0xff) + m;
+		r = n ? r * m / n : 0;
+	}
+	return (uint32_t)r;
+}
+
+/* Read the SDCC1 apps clock; if ABL left it below 1 MHz, set 50 MHz = gpll0_even / 6. */
+static int gcc_sdcc1(void)
+{
+	uint32_t cmdr = rd32(SDCC1_APPS_RCGR), cfg = rd32(SDCC1_APPS_RCGR + 4);
+	con_hex2("GCC RCG", "cmd=", cmdr, "cfg=", cfg);
+	con_hex2(" cbcr", "apps=", rd32(SDCC1_APPS_CBCR), "m/n=", rd32(SDCC1_APPS_RCGR + 8) << 16 | (rd32(SDCC1_APPS_RCGR + 12) & 0xffff));
+	base_khz = rcg_khz();
+	if (!parent_khz(cfg >> 8 & 7) || (cmdr & RCG_ROOT_OFF)) {
+		con_hex2(" rate", "kHz=", base_khz, "UNSURE=", cmdr);
+		return -1;	/* not what the gcc driver describes: do not touch it */
+	}
+	if (base_khz < 1000) {
+		/* gpll0_out_even / 6, no M/N; other CFG bits kept (as clk-rcg2 masks its update) */
+		wr32(SDCC1_APPS_RCGR + 4, (cfg & ~0x371fU) | 6 << 8 | (2 * 6 - 1));
+		wr32(SDCC1_APPS_RCGR, cmdr | RCG_UPDATE);
+		uint64_t end = ticks() + 10 * TICKS_PER_MS;
+		while (rd32(SDCC1_APPS_RCGR) & RCG_UPDATE)
+			if (ticks() > end)
+				return -2;
+		uint32_t was = base_khz;
+		base_khz = rcg_khz();
+		con_hex2(" rate", "was kHz=", was, "now=", base_khz);
+	} else {
+		con_hex2(" rate", "kHz=", base_khz, "kept=", 1);
+	}
+	return 0;
+}
 
 static int set_clock(unsigned n)
 {
@@ -140,7 +213,7 @@ static uint32_t power_on(void)
 
 static int cmd(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
 {
-	uint64_t end = ticks() + 500 * TICKS_PER_MS;
+	uint64_t start = ticks(), end = start + 3000 * TICKS_PER_MS;
 	uint32_t inhibit = PS_CMD_INHIBIT | ((flags & CMD_DATA) || (flags & 3) == RSP_48_BUSY ? PS_DAT_INHIBIT : 0);
 	while (rd32(H + SDHCI_PRESENT_STATE) & inhibit)
 		if (ticks() > end) {
@@ -165,6 +238,7 @@ static int cmd(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
 		if (st & INT_CMD_DONE) {
 			wr32(H + SDHCI_INT_STATUS, INT_CMD_DONE);
 			last_int = st;
+			last_ticks = ticks() - start;
 			break;
 		}
 		if (ticks() > end) {
@@ -236,10 +310,14 @@ static int streq8(const char *a, const char *b)
 
 static int emmc_read_test(void)
 {
+	int rc = gcc_sdcc1();
+	if (rc)
+		return fail("GCC", rc);
+	con_hex2("DIV", "ident=", div_for(400), "xfer=", div_for(25000));
 	con_hex2("PWRCTL", "irq=", power_on(), "hctl=", rd32(H + SDHCI_HOST_CONTROL));
 	wr32(H + SDHCI_INT_ENABLE, 0xfffffeff);	/* status bits on, card IRQ off */
 	wr32(H + SDHCI_SIGNAL_ENABLE, 0);		/* polled: nothing to the GIC */
-	if (set_clock(DIV_IDENT))
+	if (set_clock(div_for(400)))
 		return fail("CLOCK", -1);
 	mdelay(10);	/* >= 1 ms + 74 clocks after power-up */
 
@@ -273,19 +351,21 @@ static int emmc_read_test(void)
 		pnm[i] = c >= 0x20 && c < 0x7f ? c : '.';
 	}
 	pnm[6] = 0;
+	uint32_t t2 = (uint32_t)(last_ticks * 10 / 192);	/* us */
 	con_hex2("CID", "mid=", r[3] >> 16 & 0xff, "r3=", r[3]);
 	con_str(" name", pnm);
 
 	if (cmd(3, RCA << 16, R1, 0))
 		return fail("CMD3", -1);
+	con_hex2("TIME us", "cmd2=", t2, "cmd3=", (uint32_t)(last_ticks * 10 / 192));
 	if (cmd(9, RCA << 16, R2, 0))
-		return fail("CMD9", -1);
+		fail("CMD9", -1);	/* CSD is not needed: size comes from EXT_CSD */
 	if (cmd(7, RCA << 16, R1B, 0))
 		return fail("CMD7", -1);
-	if (set_clock(DIV_XFER))
+	if (set_clock(div_for(25000)))
 		return fail("CLOCK2", -1);
 
-	int rc = read_block(8, 0);
+	rc = read_block(8, 0);
 	if (rc)
 		return fail("EXTCSD", rc);
 	uint32_t sec = le32(212);
