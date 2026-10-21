@@ -34,9 +34,13 @@ done
 [[ $(uname -s) == Darwin ]] || { echo "macOS only (on Linux use tools/mkiosroot.sh)" >&2; exit 1; }
 [[ $EUID == 0 ]] || { echo "run as root (sudo): owners and modes must be copied exactly" >&2; exit 1; }
 
+# No early-exiting readers (head, grep -q) on pipes in this script: with
+# pipefail the writer's SIGPIPE fails the whole test.
 RSYNC=
 for r in /opt/local/bin/rsync /usr/local/bin/rsync /opt/homebrew/bin/rsync rsync; do
-	if command -v "$r" >/dev/null && "$r" --version 2>/dev/null | head -1 | grep -q 'version 3'; then
+	command -v "$r" >/dev/null || continue
+	v=$("$r" --version 2>/dev/null) || v=
+	if [[ ${v%%$'\n'*} == *'version 3'* ]]; then
 		RSYNC=$(command -v "$r")
 		break
 	fi
@@ -68,7 +72,7 @@ attach() {
 	dev=$(hdiutil attach "${class[@]}" -readonly -nobrowse -noverify -owners on \
 	    -mountpoint "$mnt" "$img" | awk 'NR==1 {print $1}')
 	devs+=("$dev")
-	mount | grep -q " on $mnt " || { echo "could not mount $img at $mnt" >&2; exit 1; }
+	[[ $(mount) == *" on $mnt "* ]] || { echo "could not mount $img at $mnt" >&2; exit 1; }
 }
 attach "$os" "$work/os"
 attach "$sysos" "$work/sysos"
