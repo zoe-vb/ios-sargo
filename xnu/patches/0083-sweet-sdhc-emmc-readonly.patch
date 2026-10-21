@@ -1,0 +1,838 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -105,6 +105,7 @@
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
++bsd/dev/sweet_sdhc.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+--- /dev/null
++++ b/bsd/dev/sweet_sdhc.c
+@@ -0,0 +1,791 @@
++/*
++ * SWEET eMMC root device for the Pixel 3a (sargo, SDM670): sdhc_1, an
++ * SDHCI 3.0 host in the Qualcomm sdhci-msm v5 wrapper ("mci removed").
++ *
++ * Unlike UFS on sweet, ABL leaves this host deinitialised (SD clock off, bus
++ * power off, host control and IRQ enables cleared), so the driver brings it
++ * up from scratch like sdhci_msm_probe + sdhci_init + mmc_attach_mmc, with
++ * the sequence the shim verified on the phone (shim/emmc.c, docs/SARGO.md):
++ *   stale power IRQs acked, vendor spec POR 0xa9c, SOFTWARE_RESET_ALL,
++ *   default (non-HS400) select, DLL held in reset, bus power with the msm
++ *   BUS_ON power-IRQ handshake, CMD0/1/2/3/7 at <= 400 kHz, then 1-bit
++ *   legacy speed (<= 26 MHz).
++ * Data moves by ADMA2 only: on this wrapper PIO reads of the buffer port
++ * return the first word forever. All xnu RAM on sargo is above 4 GiB, so
++ * the 64-bit ADMA2 format is used (SDHCI 3.0: DMA select 11b, 96-bit
++ * descriptors); each command uses one descriptor of at most XFER_MAX bytes.
++ * The host is not cache coherent: caches are cleaned/invalidated around
++ * every DMA.
++ *
++ * It finds one GPT partition by name (boot-arg sdhcroot=, default
++ * "userdata") and exposes it as the BSD disk sdhcroot0 (rsdhcroot0) with
++ * 512-byte sectors. Root on it with rd=sdhcroot0. boot-arg sdhcprobe=1
++ * brings the card up early in IOFindBSDRoot and logs what it found (card,
++ * partition, filesystem signature) without changing the root device.
++ *
++ * READ ONLY: there is no write path. Opening for writing fails with EROFS.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++/* osfmk/arm/machine_routines.h, not exported to the BSD layer */
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++int sweet_sdhc_rootdev(dev_t *dev);
++void sweet_sdhc_probe(void);
++
++/* SDHCI 3.0 */
++#define SDHCI_BLOCK_SIZE        0x04    /* 16-bit size, 16-bit count */
++#define SDHCI_ARGUMENT          0x08
++#define SDHCI_TRANSFER_MODE     0x0c    /* + command at 0x0e */
++#define SDHCI_RESPONSE          0x10
++#define SDHCI_PRESENT_STATE     0x24
++#define SDHCI_HOST_CONTROL      0x28    /* host ctl, power, block gap, wakeup */
++#define SDHCI_CLOCK_CONTROL     0x2c    /* clock, timeout, sw reset */
++#define SDHCI_INT_STATUS        0x30
++#define SDHCI_INT_ENABLE        0x34
++#define SDHCI_SIGNAL_ENABLE     0x38
++#define SDHCI_CAPABILITIES      0x40
++#define SDHCI_ADMA_ERROR        0x54
++#define SDHCI_ADMA_ADDRESS      0x58
++#define SDHCI_HOST_VERSION      0xfc
++
++/* sdhci-msm v5 vendor registers, in hc space (sdhci_msm_v5_offset) */
++#define MSM_DLL_CONFIG          0x200
++#define MSM_VENDOR_SPEC         0x20c
++#define MSM_PWRCTL_STATUS       0x240
++#define MSM_PWRCTL_CLEAR        0x248
++#define MSM_PWRCTL_CTL          0x24c
++#define VENDOR_SPEC_POR         0xa9c
++#define DLL_PDN                 (1u << 29)
++#define DLL_RST                 (1u << 30)
++#define HC_MCLK_SEL_DFLT        (2u << 8)
++#define HC_MCLK_SEL_MASK        (3u << 8)
++#define HC_SELECT_IN_EN         (1u << 18)
++#define HC_SELECT_IN_MASK       (7u << 19)
++#define PWRCTL_BUS_OFF          (1u << 0)
++#define PWRCTL_BUS_ON           (1u << 1)
++#define PWRCTL_IO_LOW           (1u << 2)
++#define PWRCTL_IO_HIGH          (1u << 3)
++#define PWRCTL_BUS_SUCCESS      (1u << 0)
++#define PWRCTL_IO_SUCCESS       (1u << 2)
++
++/* GCC SDCC1 apps RCG (gcc-sdm845 driver offsets) */
++#define GCC_SDCC1_PA            0x00126000u
++#define RCG_CMD                 0x28
++#define RCG_CFG                 0x2c
++#define RCG_M                   0x30
++#define RCG_N                   0x34
++
++#define INT_CMD_DONE            (1u << 0)
++#define INT_XFER_DONE           (1u << 1)
++#define INT_ERROR               (1u << 15)
++#define INT_ADMA_ERROR          (1u << 25)
++#define PS_CMD_INHIBIT          (1u << 0)
++#define PS_DAT_INHIBIT          (1u << 1)
++
++#define RSP_NONE                0x00
++#define RSP_136                 0x01
++#define RSP_48                  0x02
++#define RSP_48_BUSY             0x03
++#define CMD_CRC                 0x08
++#define CMD_INDEX               0x10
++#define CMD_DATA                0x20
++#define R1                      (RSP_48 | CMD_CRC | CMD_INDEX)
++#define R1B                     (RSP_48_BUSY | CMD_CRC | CMD_INDEX)
++#define R2                      (RSP_136 | CMD_CRC)
++#define R3                      RSP_48
++
++#define XFER_DMA                (1u << 0)
++#define XFER_BCE                (1u << 1)
++#define XFER_ACMD12             (1u << 2)
++#define XFER_READ               (1u << 4)
++#define XFER_MULTI              (1u << 5)
++#define HCTL_ADMA2_64           (3u << 3)
++
++#define ADMA_VALID              0x01
++#define ADMA_END                0x02
++#define ADMA_TRAN               0x20
++
++#define OCR_BUSY                (1u << 31)
++#define OCR_SECTOR_MODE         0x40000000u
++#define OCR_VOLTAGES            0x00ff8080u
++#define RCA                     1
++
++#define SECTOR                  512u
++#define XFER_MAX                (32u << 10)     /* one ADMA2 descriptor, 16-bit length */
++#define CMD_TIMEOUT_NS          (3ull * NSEC_PER_SEC)
++#define DMA_DESC                0x0000          /* 8-byte aligned descriptor */
++#define DMA_BOUNCE              0x1000
++#define DMA_SIZE                (DMA_BOUNCE + XFER_MAX)
++
++static struct {
++	vm_offset_t regs;
++	vm_offset_t dma;                        /* kernel VA of the DMA allocation */
++	uint64_t dma_pa;
++	uint32_t base_khz;                      /* SDHCI base clock = SDCC1 apps clock */
++	uint64_t card_sectors;
++	uint64_t first, nsectors;               /* partition, in 512-byte sectors */
++	uint32_t last_int;
++	int bmajor, cmajor;
++	dev_t bdev;
++	int init_error;                         /* -1: not tried yet */
++	bool ready;
++} sd = { .init_error = -1 };
++
++static LCK_GRP_DECLARE(sweet_sdhc_grp, "sweet_sdhc");
++static LCK_MTX_DECLARE(sweet_sdhc_lock, &sweet_sdhc_grp);
++
++static inline uint32_t
++sd_rd(uint32_t off)
++{
++	return *(volatile uint32_t *)(sd.regs + off);
++}
++
++static inline void
++sd_wr(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(sd.regs + off) = v;
++}
++
++static uint64_t
++deadline_ms(uint32_t ms)
++{
++	uint64_t d;
++	nanoseconds_to_absolutetime((uint64_t)ms * NSEC_PER_MSEC, &d);
++	return mach_absolute_time() + d;
++}
++
++/* Ack msm power IRQs like sdhci_msm_handle_pwr_irq for up to ms; stop early on stop_on. */
++static uint32_t
++pwr_service(uint32_t ms, uint32_t stop_on)
++{
++	uint32_t seen = 0;
++	uint64_t end = deadline_ms(ms);
++	while (mach_absolute_time() < end) {
++		uint32_t st = sd_rd(MSM_PWRCTL_STATUS);
++		if (!st) {
++			delay(10);
++			continue;
++		}
++		seen |= st;
++		sd_wr(MSM_PWRCTL_CLEAR, st);
++		uint32_t ack = 0;
++		if (st & (PWRCTL_BUS_ON | PWRCTL_BUS_OFF)) {
++			ack |= PWRCTL_BUS_SUCCESS;
++		}
++		if (st & (PWRCTL_IO_HIGH | PWRCTL_IO_LOW)) {
++			ack |= PWRCTL_IO_SUCCESS;
++		}
++		sd_wr(MSM_PWRCTL_CTL, ack);
++		if (st & stop_on) {
++			break;
++		}
++	}
++	return seen;
++}
++
++/* SDCC1 apps clock from its RCG (clk-rcg2: hid div = 2*div-1, N stored as ~(n-m)). */
++static uint32_t
++sdcc1_khz(void)
++{
++	vm_offset_t gcc = ml_io_map(GCC_SDCC1_PA, PAGE_SIZE);
++	if (!gcc) {
++		return 0;
++	}
++	uint32_t cfg = *(volatile uint32_t *)(gcc + RCG_CFG);
++	uint32_t parent;
++	switch (cfg >> 8 & 7) {
++	case 0: parent = 19200; break;          /* bi_tcxo */
++	case 1: parent = 600000; break;         /* gpll0 main */
++	case 2: parent = 384000; break;         /* gpll6 main */
++	case 6: parent = 300000; break;         /* gpll0 out even */
++	default: return 0;
++	}
++	uint32_t hid = cfg & 0x1f;
++	uint64_t r = hid ? (uint64_t)parent * 2 / (hid + 1) : parent;
++	if ((cfg >> 12 & 3) == 2) {
++		uint32_t m = *(volatile uint32_t *)(gcc + RCG_M) & 0xff;
++		uint32_t n = ((~*(volatile uint32_t *)(gcc + RCG_N)) & 0xff) + m;
++		r = n ? r * m / n : 0;
++	}
++	return (uint32_t)r;
++}
++
++/* SDHCI 3.0 divided clock: f = base / (2N), N = 1..1023, 0 = undivided */
++static int
++set_clock(uint32_t khz)
++{
++	uint32_t n = 0;
++	if (sd.base_khz > khz) {
++		n = (sd.base_khz + 2 * khz - 1) / (2 * khz);
++		n = MIN(n, 1023u);
++	}
++	uint32_t keep = 0x0e << 16;             /* max data timeout; reset byte stays 0 */
++	sd_wr(SDHCI_CLOCK_CONTROL, keep | (sd_rd(SDHCI_CLOCK_CONTROL) & 0xffff & ~4u));
++	uint32_t clk = (n & 0xff) << 8 | ((n >> 8) & 3) << 6 | 1;
++	sd_wr(SDHCI_CLOCK_CONTROL, keep | clk);
++	uint64_t end = deadline_ms(20);
++	while (!(sd_rd(SDHCI_CLOCK_CONTROL) & 2)) {
++		if (mach_absolute_time() > end) {
++			return ETIMEDOUT;
++		}
++	}
++	sd_wr(SDHCI_CLOCK_CONTROL, keep | clk | 4);
++	return 0;
++}
++
++static void
++reset_lines(void)
++{
++	uint32_t c = sd_rd(SDHCI_CLOCK_CONTROL) & 0x00ffffff;
++	sd_wr(SDHCI_CLOCK_CONTROL, c | 6u << 24);
++	uint64_t end = deadline_ms(100);
++	while ((sd_rd(SDHCI_CLOCK_CONTROL) & (6u << 24)) && mach_absolute_time() < end) {
++	}
++}
++
++/*
++ * One command; data commands also wait for transfer complete. On this
++ * wrapper an R1b once reported busy end without command complete: accept it.
++ */
++static int
++sd_cmd(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
++{
++	uint64_t end;
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &end);
++	end += mach_absolute_time();
++	bool busy = (flags & 3) == RSP_48_BUSY;
++	uint32_t inhibit = PS_CMD_INHIBIT | ((flags & CMD_DATA) || busy ? PS_DAT_INHIBIT : 0);
++	while (sd_rd(SDHCI_PRESENT_STATE) & inhibit) {
++		if (mach_absolute_time() > end) {
++			sd.last_int = 0xdead0000 | sd_rd(SDHCI_PRESENT_STATE) >> 16;
++			return EBUSY;
++		}
++	}
++	sd_wr(SDHCI_INT_STATUS, 0xffffffff);
++	sd_wr(SDHCI_ARGUMENT, arg);
++	sd_wr(SDHCI_TRANSFER_MODE, (idx << 8 | flags) << 16 | xfer);
++	bool cmd_done = false;
++	for (;;) {
++		uint32_t st = sd_rd(SDHCI_INT_STATUS);
++		if (st & INT_ERROR) {
++			sd.last_int = st;
++			sd_wr(SDHCI_INT_STATUS, st);
++			reset_lines();
++			return EIO;
++		}
++		if (!cmd_done && (st & INT_CMD_DONE)) {
++			sd_wr(SDHCI_INT_STATUS, INT_CMD_DONE);
++			cmd_done = true;
++			if (!(flags & CMD_DATA) && !busy) {
++				break;
++			}
++		}
++		if ((cmd_done || busy) && (st & INT_XFER_DONE)) {
++			sd_wr(SDHCI_INT_STATUS, INT_XFER_DONE);
++			break;
++		}
++		if (mach_absolute_time() > end) {
++			sd.last_int = st | 0x80000000u;
++			reset_lines();
++			return ETIMEDOUT;
++		}
++	}
++	sd.last_int = 0;
++	return 0;
++}
++
++/* Read count 512-byte units (count <= XFER_MAX / 512) by ADMA2 into the bounce buffer. */
++static int
++sd_read(unsigned idx, uint32_t arg, uint32_t count)
++{
++	if (count == 0 || count > XFER_MAX / SECTOR) {
++		return EINVAL;
++	}
++	uint32_t len = count * SECTOR;
++	uint64_t buf = sd.dma_pa + DMA_BOUNCE;
++	volatile uint32_t *desc = (volatile uint32_t *)(sd.dma + DMA_DESC);
++	desc[0] = len << 16 | ADMA_TRAN | ADMA_END | ADMA_VALID;
++	desc[1] = (uint32_t)buf;
++	desc[2] = (uint32_t)(buf >> 32);
++	clean_dcache64((addr64_t)(sd.dma_pa + DMA_DESC), 16, TRUE);
++	flush_dcache64((addr64_t)buf, len, TRUE);       /* no dirty lines over the DMA */
++	uint64_t desc_pa = sd.dma_pa + DMA_DESC;
++	sd_wr(SDHCI_ADMA_ADDRESS, (uint32_t)desc_pa);
++	sd_wr(SDHCI_ADMA_ADDRESS + 4, (uint32_t)(desc_pa >> 32));
++	sd_wr(SDHCI_HOST_CONTROL, (sd_rd(SDHCI_HOST_CONTROL) & ~(3u << 3)) | HCTL_ADMA2_64);
++	sd_wr(SDHCI_BLOCK_SIZE, count << 16 | SECTOR);
++	unsigned xfer = XFER_DMA | XFER_READ;
++	if (count > 1) {
++		/* msm: SDHCI_QUIRK_MULTIBLOCK_READ_ACMD12 */
++		xfer |= XFER_BCE | XFER_MULTI | XFER_ACMD12;
++	}
++	int error = sd_cmd(idx, arg, R1 | CMD_DATA, xfer);
++	flush_dcache64((addr64_t)buf, len, TRUE);       /* drop lines fetched during the DMA */
++	if (error && (sd.last_int & INT_ADMA_ERROR)) {
++		printf("SWEET SDHC: ADMA error 0x%x at desc 0x%x%08x\n", sd_rd(SDHCI_ADMA_ERROR),
++		    sd_rd(SDHCI_ADMA_ADDRESS + 4), sd_rd(SDHCI_ADMA_ADDRESS));
++	}
++	return error;
++}
++
++static int
++sd_read_sectors(uint64_t lba, uint32_t count)
++{
++	if (lba + count > sd.card_sectors || lba > UINT32_MAX) {
++		return EINVAL;
++	}
++	return sd_read(count > 1 ? 18 : 17, (uint32_t)lba, count);
++}
++
++static const uint8_t *
++bounce(void)
++{
++	return (const uint8_t *)(sd.dma + DMA_BOUNCE);
++}
++
++static int
++sd_card_init(void)
++{
++	uint32_t stale = pwr_service(5, 0);
++	sd_wr(MSM_VENDOR_SPEC, VENDOR_SPEC_POR);
++	uint32_t c = sd_rd(SDHCI_CLOCK_CONTROL) & 0x00ffffff;
++	sd_wr(SDHCI_CLOCK_CONTROL, c | 1u << 24);       /* SOFTWARE_RESET_ALL */
++	uint64_t end = deadline_ms(100);
++	while (sd_rd(SDHCI_CLOCK_CONTROL) & (1u << 24)) {
++		if (mach_absolute_time() > end) {
++			printf("SWEET SDHC: reset timeout\n");
++			return ETIMEDOUT;
++		}
++	}
++	uint32_t after = pwr_service(20, 0);
++	uint32_t vs = sd_rd(MSM_VENDOR_SPEC);
++	vs = (vs & ~(HC_MCLK_SEL_MASK | HC_SELECT_IN_EN | HC_SELECT_IN_MASK)) | HC_MCLK_SEL_DFLT;
++	sd_wr(MSM_VENDOR_SPEC, vs);
++	sd_wr(MSM_DLL_CONFIG, sd_rd(MSM_DLL_CONFIG) | DLL_RST | DLL_PDN);
++	uint32_t hc = sd_rd(SDHCI_HOST_CONTROL) & ~0xff00u;
++	sd_wr(SDHCI_HOST_CONTROL, hc | (0x0du << 8));   /* 3.0 V | bus power on, 1-bit */
++	uint32_t on = pwr_service(50, PWRCTL_BUS_ON);
++	sd_wr(SDHCI_INT_ENABLE, 0xfffffeffu);           /* status bits on, card IRQ off */
++	sd_wr(SDHCI_SIGNAL_ENABLE, 0);                  /* polled */
++	printf("SWEET SDHC: host v%u caps 0x%x, base %u kHz, power IRQs 0x%x/0x%x/0x%x\n",
++	    sd_rd(SDHCI_HOST_VERSION) >> 16 & 0xff, sd_rd(SDHCI_CAPABILITIES), sd.base_khz,
++	    stale, after, on);
++
++	int error = set_clock(400);
++	if (error) {
++		return error;
++	}
++	delay(10000);                                   /* >= 1 ms + 74 clocks after power-up */
++	if ((error = sd_cmd(0, 0, RSP_NONE, 0))) {
++		goto fail0;
++	}
++	delay(2000);
++	uint32_t ocr = 0;
++	end = deadline_ms(2000);
++	do {
++		if ((error = sd_cmd(1, OCR_SECTOR_MODE | OCR_VOLTAGES, R3, 0))) {
++			goto fail1;
++		}
++		ocr = sd_rd(SDHCI_RESPONSE);
++		if (!(ocr & OCR_BUSY)) {
++			delay(5000);
++		}
++	} while (!(ocr & OCR_BUSY) && mach_absolute_time() < end);
++	if (!(ocr & OCR_BUSY) || !(ocr & OCR_SECTOR_MODE)) {
++		printf("SWEET SDHC: card not ready or not sector-addressed, OCR 0x%x\n", ocr);
++		return ENXIO;
++	}
++	if ((error = sd_cmd(2, 0, R2, 0)) ||
++	    (error = sd_cmd(3, RCA << 16, R1, 0)) ||
++	    (error = sd_cmd(7, RCA << 16, R1B, 0))) {
++		printf("SWEET SDHC: identification failed: %d, int 0x%x\n", error, sd.last_int);
++		return error;
++	}
++	if ((error = set_clock(25000))) {
++		return error;
++	}
++	if ((error = sd_read(8, 0, 1))) {                /* SEND_EXT_CSD */
++		printf("SWEET SDHC: EXT_CSD read failed: %d, int 0x%x\n", error, sd.last_int);
++		return error;
++	}
++	const uint8_t *x = bounce();
++	sd.card_sectors = (uint32_t)(x[212] | x[213] << 8 | x[214] << 16 | (uint32_t)x[215] << 24);
++	printf("SWEET SDHC: card OCR 0x%x, EXT_CSD rev %u, %llu sectors (%llu MiB), partition config 0x%x\n",
++	    ocr, x[192], sd.card_sectors, sd.card_sectors >> 11, x[179]);
++	return sd.card_sectors ? 0 : ENXIO;
++fail0:
++	printf("SWEET SDHC: CMD0 failed: %d, int 0x%x\n", error, sd.last_int);
++	return error;
++fail1:
++	printf("SWEET SDHC: CMD1 failed: %d, int 0x%x\n", error, sd.last_int);
++	return error;
++}
++
++static int
++sd_find_partition(const char *want)
++{
++	int error = sd_read_sectors(1, 1);
++	if (error) {
++		return error;
++	}
++	const uint8_t *b = bounce();
++	if (memcmp(b, "EFI PART", 8) != 0) {
++		printf("SWEET SDHC: no GPT\n");
++		return ENXIO;
++	}
++	uint64_t entry_lba;
++	uint32_t nent, esz;
++	memcpy(&entry_lba, b + 72, 8);
++	memcpy(&nent, b + 80, 4);
++	memcpy(&esz, b + 84, 4);
++	if (esz != 128 || nent == 0 || nent > 1024) {
++		printf("SWEET SDHC: unsupported GPT entries %u x %u\n", nent, esz);
++		return ENXIO;
++	}
++	uint32_t per = XFER_MAX / esz;
++	for (uint32_t base = 0; base < nent; base += per) {
++		uint32_t n = MIN(per, nent - base);
++		error = sd_read_sectors(entry_lba + base * esz / SECTOR, (n * esz + SECTOR - 1) / SECTOR);
++		if (error) {
++			return error;
++		}
++		for (uint32_t i = 0; i < n; i++) {
++			const uint8_t *e = bounce() + i * esz;
++			char name[37];
++			unsigned c;
++			for (c = 0; c < 36; c++) {
++				uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
++				if (ch == 0 || ch > 0x7f) {
++					break;
++				}
++				name[c] = (char)ch;
++			}
++			name[c] = 0;
++			if (strcmp(name, want) != 0) {
++				continue;
++			}
++			uint64_t first, last;
++			memcpy(&first, e + 32, 8);
++			memcpy(&last, e + 40, 8);
++			if (last < first || last >= sd.card_sectors) {
++				return ENXIO;
++			}
++			sd.first = first;
++			sd.nsectors = last - first + 1;
++			return 0;
++		}
++	}
++	printf("SWEET SDHC: no GPT partition named \"%s\"\n", want);
++	return ENOENT;
++}
++
++static int
++sweet_sdhc_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++{
++	if (!sd.ready) {
++		return ENXIO;
++	}
++	return (flags & FWRITE) ? EROFS : 0;
++}
++
++static int
++sweet_sdhc_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++sweet_sdhc_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t vaddr = NULL;
++	uint64_t off = (uint64_t)buf_blkno(bp) * SECTOR;
++	uint32_t count = buf_count(bp);
++	uint64_t part_bytes = sd.nsectors * SECTOR;
++
++	buf_setresid(bp, count);
++	if (!(buf_flags(bp) & B_READ)) {
++		error = EROFS;
++		goto done;
++	}
++	if (off > part_bytes || count > part_bytes - off) {
++		error = EINVAL;
++		goto done;
++	}
++	if (count == 0) {
++		goto done;
++	}
++	if (buf_map(bp, &vaddr)) {
++		error = EIO;
++		goto done;
++	}
++
++	lck_mtx_lock(&sweet_sdhc_lock);
++	for (uint32_t done = 0; done < count;) {
++		uint64_t pos = off + done;
++		uint64_t lba = pos / SECTOR;
++		uint32_t skip = (uint32_t)(pos % SECTOR);
++		uint32_t want = MIN(count - done, XFER_MAX - skip);
++		uint32_t sectors = (skip + want + SECTOR - 1) / SECTOR;
++		error = sd_read_sectors(sd.first + lba, sectors);
++		if (error) {
++			printf("SWEET SDHC: read of %u sectors at 0x%llx failed: %d, int 0x%x\n",
++			    sectors, sd.first + lba, error, sd.last_int);
++			break;
++		}
++		memcpy(vaddr + done, bounce() + skip, want);
++		done += want;
++		buf_setresid(bp, count - done);
++	}
++	lck_mtx_unlock(&sweet_sdhc_lock);
++	buf_unmap(bp);
++
++done:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++static int
++sweet_sdhc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
++    __unused struct proc *p, int is_char)
++{
++	uint32_t *f = (uint32_t *)data;
++	uint64_t *o = (uint64_t *)data;
++
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*f = SECTOR;
++		return 0;
++	case DKIOCSETBLOCKSIZE:
++		if (is_char) {
++			return ENODEV;
++		}
++		return *f == SECTOR ? 0 : EINVAL;
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*f = SECTOR;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*o = sd.nsectors;
++		return 0;
++	case DKIOCISWRITABLE:
++		*f = 0;
++		return 0;
++	case DKIOCSYNCHRONIZE:
++	case DKIOCSYNCHRONIZECACHE:
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++		*o = XFER_MAX / SECTOR;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*o = 0;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*o = 1;
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++sweet_sdhc_bioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_sdhc_ioctl(dev, cmd, data, flag, p, 0);
++}
++
++static int
++sweet_sdhc_cioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_sdhc_ioctl(dev, cmd, data, flag, p, 1);
++}
++
++static int
++sweet_sdhc_psize(__unused dev_t dev)
++{
++	return SECTOR;
++}
++
++static int
++sweet_sdhc_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	return physio(sweet_sdhc_strategy, NULL, dev, B_READ, minphys, uio, SECTOR);
++}
++
++static int
++sweet_sdhc_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++{
++	return EROFS;
++}
++
++static const struct bdevsw sweet_sdhc_bdevsw = {
++	.d_open     = sweet_sdhc_open,
++	.d_close    = sweet_sdhc_close,
++	.d_strategy = sweet_sdhc_strategy,
++	.d_ioctl    = sweet_sdhc_bioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = sweet_sdhc_psize,
++	.d_type     = D_DISK,
++};
++
++static const struct cdevsw sweet_sdhc_cdevsw = {
++	.d_open       = sweet_sdhc_open,
++	.d_close      = sweet_sdhc_close,
++	.d_read       = sweet_sdhc_read,
++	.d_write      = sweet_sdhc_write,
++	.d_ioctl      = sweet_sdhc_cioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = D_DISK,
++};
++
++static int
++sweet_sdhc_init(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	char want[64] = "userdata";
++	int error;
++
++	if (SecureDTLookupEntry(NULL, "/sweet-sdhc", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		printf("SWEET SDHC: no /sweet-sdhc node in the device tree\n");
++		return ENXIO;
++	}
++	PE_parse_boot_argn("sdhcroot", want, sizeof(want));
++
++	sd.regs = ml_io_map(reg[0], reg[1]);
++	sd.base_khz = sdcc1_khz();
++	if (!sd.regs || !sd.base_khz) {
++		printf("SWEET SDHC: no registers or unknown SDCC1 clock\n");
++		return ENXIO;
++	}
++	if (kmem_alloc_contig(kernel_map, &sd.dma, DMA_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET SDHC: no contiguous DMA memory\n");
++		return ENOMEM;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)sd.dma);
++	if (!pn) {
++		return ENOMEM;
++	}
++	sd.dma_pa = ptoa_64(pn);
++
++	lck_mtx_lock(&sweet_sdhc_lock);
++	error = sd_card_init();
++	if (!error) {
++		error = sd_find_partition(want);
++	}
++	lck_mtx_unlock(&sweet_sdhc_lock);
++	if (error) {
++		return error;
++	}
++
++	sd.bmajor = bdevsw_add(-1, &sweet_sdhc_bdevsw);
++	if (sd.bmajor < 0) {
++		return ENXIO;
++	}
++	sd.cmajor = cdevsw_add_with_bdev(-1, &sweet_sdhc_cdevsw, sd.bmajor);
++	if (sd.cmajor < 0) {
++		return ENXIO;
++	}
++	sd.bdev = makedev(sd.bmajor, 0);
++	devfs_make_node(sd.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdhcroot0");
++	devfs_make_node(makedev(sd.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdhcroot0");
++	sd.ready = true;
++	printf("SWEET SDHC: \"%s\": first sector 0x%llx, %llu MiB, read-only, DMA at 0x%llx\n",
++	    want, sd.first, sd.nsectors >> 11, sd.dma_pa);
++	return 0;
++}
++
++static int
++sweet_sdhc_init_once(void)
++{
++	if (sd.init_error < 0) {
++		sd.init_error = sweet_sdhc_init();
++	}
++	return sd.init_error;
++}
++
++/* Root device for rd=sdhcroot0 (IOFindBSDRoot). */
++int
++sweet_sdhc_rootdev(dev_t *dev)
++{
++	int error = sweet_sdhc_init_once();
++	if (error) {
++		return error;
++	}
++	*dev = sd.bdev;
++	return 0;
++}
++
++/*
++ * boot-arg sdhcprobe=1: bring the card up and log what the partition holds,
++ * without using it as root. ext4 keeps its magic 0xef53 at byte 0x438, f2fs
++ * 0xf2f52010 at 0x400, HFS+ "H+"/"HX" at 0x400.
++ */
++void
++sweet_sdhc_probe(void)
++{
++	int error = sweet_sdhc_init_once();
++	if (error) {
++		printf("SWEET SDHC: probe failed: %d\n", error);
++		return;
++	}
++	lck_mtx_lock(&sweet_sdhc_lock);
++	error = sd_read_sectors(sd.first, 8);
++	if (!error) {
++		const uint8_t *b = bounce();
++		uint16_t ext4 = (uint16_t)(b[0x438] | b[0x439] << 8);
++		uint32_t f2fs = (uint32_t)(b[0x400] | b[0x401] << 8 | b[0x402] << 16 | (uint32_t)b[0x403] << 24);
++		printf("SWEET SDHC: probe: partition start reads OK: %s (ext4 0x%04x f2fs 0x%08x hfs \"%c%c\")\n",
++		    ext4 == 0xef53 ? "ext4" : f2fs == 0xf2f52010 ? "f2fs" :
++		    (b[0x400] == 'H' && (b[0x401] == '+' || b[0x401] == 'X')) ? "HFS+" : "unknown",
++		    ext4, f2fs, b[0x400] >= 0x20 && b[0x400] < 0x7f ? b[0x400] : '.',
++		    b[0x401] >= 0x20 && b[0x401] < 0x7f ? b[0x401] : '.');
++	} else {
++		printf("SWEET SDHC: probe: read of the partition start failed: %d, int 0x%x\n",
++		    error, sd.last_int);
++	}
++	/* A multi-descriptor-sized read across the middle of the partition. */
++	if (!error) {
++		uint64_t t0 = mach_absolute_time();
++		error = sd_read_sectors(sd.first + sd.nsectors / 2, XFER_MAX / SECTOR);
++		uint64_t ns;
++		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++		printf("SWEET SDHC: probe: %u KiB read at mid-partition: %d in %llu us\n",
++		    XFER_MAX >> 10, error, ns / NSEC_PER_USEC);
++	}
++	lck_mtx_unlock(&sweet_sdhc_lock);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -768,6 +768,31 @@
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ //
++//	SWEET (sargo): eMMC test without using it as root (bsd/dev/sweet_sdhc.c)
++//
++	{
++		uint32_t sdhcprobe = 0;
++		if (PE_parse_boot_argn("sdhcprobe", &sdhcprobe, sizeof(sdhcprobe)) && sdhcprobe) {
++			extern void sweet_sdhc_probe(void);
++			sweet_sdhc_probe();
++		}
++	}
++//
++//	SWEET (sargo): root on a GPT partition of the internal eMMC
++//
++	if (strcmp(rdBootVar, "sdhcroot0") == 0) {
++		extern int sweet_sdhc_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int sdhc_error = sweet_sdhc_rootdev(root);
++		if (sdhc_error) {
++			panic("IOFindBSDRoot: SWEET eMMC root %s unavailable: %d", rdBootVar, sdhc_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
++//
+ //	SWEET: root on a GPT partition of the internal UFS (bsd/dev/sweet_ufs.c)
+ //
+ 	if (strcmp(rdBootVar, "ufsroot0") == 0) {
