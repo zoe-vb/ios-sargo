@@ -137,7 +137,9 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   `"userdata": first sector 0x108e400, 51163 MiB, read-only, DMA at 0x102d68000` (64-bit ADMA2 OK);
   `probe: partition start reads OK: ext4 (ext4 0xef53 ...)`; `32 KiB read at mid-partition: 0 in 11288 us`
   (~2.9 MB/s, 1-bit legacy speed). Then `BSD root: md0` and PID 1 as in x09. Nothing was written.
-- Next for storage: faster bus (CMD6 to 8-bit + HS52/DDR52, volatile EXT_CSD settings; HS200/HS400
+- Patch 0084 (`2449cc1`, CI 39682469923, `xnu-kernel-0084/`): 8-bit + HS52 with per-step EXT_CSD verify
+  and fallback (`sdhcspeed=`, default 2), probe times a 4 MiB read. x11 = x10 with this kernel: Booting OKAY.
+- Next for storage (before 0084): faster bus (CMD6 to 8-bit + HS52/DDR52, volatile EXT_CSD settings; HS200/HS400
   need tuning), larger transfers (several ADMA descriptors once the 12/16-byte descriptor size is
   confirmed), then a write path (needed for the iOS root) and installing the HFS+ root into userdata
   (erases Android data: ask the user first).
