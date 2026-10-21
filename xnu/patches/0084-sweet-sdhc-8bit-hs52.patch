@@ -1,0 +1,211 @@
+--- a/bsd/dev/sweet_sdhc.c
++++ b/bsd/dev/sweet_sdhc.c
+@@ -10,6 +10,11 @@
+  *   default (non-HS400) select, DLL held in reset, bus power with the msm
+  *   BUS_ON power-IRQ handshake, CMD0/1/2/3/7 at <= 400 kHz, then 1-bit
+  *   legacy speed (<= 26 MHz).
++ * Then (boot-arg sdhcspeed=, default 2) CMD6 to an 8-bit bus (1) and High
++ * Speed SDR at 52 MHz (2). CMD6 only sets volatile EXT_CSD mode bytes; each
++ * step is verified by re-reading EXT_CSD and comparing its read-only
++ * properties with the 1-bit copy, and undone (card and host) on any error,
++ * so a failed step leaves the previous, working mode.
+  * Data moves by ADMA2 only: on this wrapper PIO reads of the buffer port
+  * return the first word forever. All xnu RAM on sargo is above 4 GiB, so
+  * the 64-bit ADMA2 format is used (SDHCI 3.0: DMA select 11b, 96-bit
+@@ -114,6 +119,19 @@
+ #define R2                      (RSP_136 | CMD_CRC)
+ #define R3                      RSP_48
+ 
++#define HCTL_HISPD              (1u << 2)
++#define HCTL_8BIT               (1u << 5)
++
++/* EXT_CSD */
++#define EXT_CSD_BUS_WIDTH       183
++#define EXT_CSD_HS_TIMING       185
++#define EXT_CSD_DEVICE_TYPE     196
++#define EXT_CSD_PROPS           192     /* bytes 192..511: read-only properties */
++#define DEVICE_TYPE_HS52        (1u << 1)
++#define R1_SWITCH_ERROR         (1u << 7)
++#define R1_STATE(r)             (((r) >> 9) & 0xf)
++#define R1_STATE_TRAN           4
++
+ #define XFER_DMA                (1u << 0)
+ #define XFER_BCE                (1u << 1)
+ #define XFER_ACMD12             (1u << 2)
+@@ -145,11 +163,14 @@
+ 	uint64_t card_sectors;
+ 	uint64_t first, nsectors;               /* partition, in 512-byte sectors */
+ 	uint32_t last_int;
++	uint32_t bus_khz;                       /* current card clock request */
++	const char *mode;
++	uint8_t props[512 - EXT_CSD_PROPS];     /* EXT_CSD read-only part, read at 1-bit */
+ 	int bmajor, cmajor;
+ 	dev_t bdev;
+ 	int init_error;                         /* -1: not tried yet */
+ 	bool ready;
+-} sd = { .init_error = -1 };
++} sd = { .init_error = -1, .mode = "1-bit legacy" };
+ 
+ static LCK_GRP_DECLARE(sweet_sdhc_grp, "sweet_sdhc");
+ static LCK_MTX_DECLARE(sweet_sdhc_lock, &sweet_sdhc_grp);
+@@ -234,6 +255,7 @@
+ static int
+ set_clock(uint32_t khz)
+ {
++	sd.bus_khz = khz;
+ 	uint32_t n = 0;
+ 	if (sd.base_khz > khz) {
+ 		n = (sd.base_khz + 2 * khz - 1) / (2 * khz);
+@@ -363,7 +385,111 @@
+ 	return (const uint8_t *)(sd.dma + DMA_BOUNCE);
+ }
+ 
++/* CMD6 SWITCH (write byte) of one EXT_CSD mode byte, then CMD13 until tran without SWITCH_ERROR. */
+ static int
++mmc_switch(unsigned index, unsigned value)
++{
++	int error = sd_cmd(6, 3u << 24 | index << 16 | value << 8, R1B, 0);
++	if (error) {
++		return error;
++	}
++	uint64_t end = deadline_ms(500);
++	for (;;) {
++		if ((error = sd_cmd(13, RCA << 16, R1, 0))) {
++			return error;
++		}
++		uint32_t r1 = sd_rd(SDHCI_RESPONSE);
++		if (r1 & R1_SWITCH_ERROR) {
++			printf("SWEET SDHC: CMD6 [%u]=%u: switch error, status 0x%x\n", index, value, r1);
++			return EIO;
++		}
++		if (R1_STATE(r1) == R1_STATE_TRAN) {
++			return 0;
++		}
++		if (mach_absolute_time() > end) {
++			printf("SWEET SDHC: CMD6 [%u]=%u: card stuck in state %u\n", index, value, R1_STATE(r1));
++			return ETIMEDOUT;
++		}
++		delay(100);
++	}
++}
++
++/* Re-read EXT_CSD in the current mode: the read-only part must match the 1-bit copy. */
++static int
++verify_ext_csd(void)
++{
++	int error = sd_read(8, 0, 1);
++	if (error) {
++		return error;
++	}
++	return memcmp(bounce() + EXT_CSD_PROPS, sd.props, sizeof(sd.props)) ? EIO : 0;
++}
++
++static void
++set_host_ctl(uint32_t set, uint32_t clear)
++{
++	sd_wr(SDHCI_HOST_CONTROL, (sd_rd(SDHCI_HOST_CONTROL) & ~clear) | set);
++}
++
++static void
++sd_speed_up(const uint8_t *ext_csd)
++{
++	uint32_t speed = 2;
++	PE_parse_boot_argn("sdhcspeed", &speed, sizeof(speed));
++	memcpy(sd.props, ext_csd + EXT_CSD_PROPS, sizeof(sd.props));
++	uint8_t types = ext_csd[EXT_CSD_DEVICE_TYPE];
++	sd.mode = "1-bit legacy";
++	if (speed < 1) {
++		return;
++	}
++
++	int error = mmc_switch(EXT_CSD_BUS_WIDTH, 2);   /* 8-bit SDR */
++	if (!error) {
++		set_host_ctl(HCTL_8BIT, 0);
++		error = verify_ext_csd();
++		if (error) {
++			printf("SWEET SDHC: 8-bit bus does not verify (%d, int 0x%x): back to 1-bit\n",
++			    error, sd.last_int);
++			set_host_ctl(0, HCTL_8BIT);
++			(void)mmc_switch(EXT_CSD_BUS_WIDTH, 0);
++			return;
++		}
++	} else {
++		printf("SWEET SDHC: switch to 8-bit failed: %d, int 0x%x\n", error, sd.last_int);
++		return;
++	}
++	sd.mode = "8-bit legacy";
++	if (speed < 2) {
++		return;
++	}
++	if (!(types & DEVICE_TYPE_HS52)) {
++		printf("SWEET SDHC: card device type 0x%x has no HS52\n", types);
++		return;
++	}
++
++	error = mmc_switch(EXT_CSD_HS_TIMING, 1);       /* High Speed */
++	if (!error) {
++		set_host_ctl(HCTL_HISPD, 0);
++		error = set_clock(52000);
++		if (!error) {
++			error = verify_ext_csd();
++		}
++		if (error) {
++			printf("SWEET SDHC: HS52 does not verify (%d, int 0x%x): back to legacy speed\n",
++			    error, sd.last_int);
++			set_clock(25000);
++			set_host_ctl(0, HCTL_HISPD);
++			(void)mmc_switch(EXT_CSD_HS_TIMING, 0);
++			return;
++		}
++	} else {
++		printf("SWEET SDHC: switch to HS52 failed: %d, int 0x%x\n", error, sd.last_int);
++		return;
++	}
++	sd.mode = "8-bit HS52";
++}
++
++static int
+ sd_card_init(void)
+ {
+ 	uint32_t stale = pwr_service(5, 0);
+@@ -430,9 +556,17 @@
+ 	}
+ 	const uint8_t *x = bounce();
+ 	sd.card_sectors = (uint32_t)(x[212] | x[213] << 8 | x[214] << 16 | (uint32_t)x[215] << 24);
+-	printf("SWEET SDHC: card OCR 0x%x, EXT_CSD rev %u, %llu sectors (%llu MiB), partition config 0x%x\n",
+-	    ocr, x[192], sd.card_sectors, sd.card_sectors >> 11, x[179]);
+-	return sd.card_sectors ? 0 : ENXIO;
++	printf("SWEET SDHC: card OCR 0x%x, EXT_CSD rev %u, %llu sectors (%llu MiB), partition config 0x%x, device type 0x%x\n",
++	    ocr, x[192], sd.card_sectors, sd.card_sectors >> 11, x[179], x[EXT_CSD_DEVICE_TYPE]);
++	if (!sd.card_sectors) {
++		return ENXIO;
++	}
++	uint8_t ext_csd[512];
++	memcpy(ext_csd, x, sizeof(ext_csd));
++	sd_speed_up(ext_csd);
++	printf("SWEET SDHC: bus %s, card clock %u kHz requested (base %u kHz)\n",
++	    sd.mode, sd.bus_khz, sd.base_khz);
++	return 0;
+ fail0:
+ 	printf("SWEET SDHC: CMD0 failed: %d, int 0x%x\n", error, sd.last_int);
+ 	return error;
+@@ -783,8 +917,17 @@
+ 		error = sd_read_sectors(sd.first + sd.nsectors / 2, XFER_MAX / SECTOR);
+ 		uint64_t ns;
+ 		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+-		printf("SWEET SDHC: probe: %u KiB read at mid-partition: %d in %llu us\n",
+-		    XFER_MAX >> 10, error, ns / NSEC_PER_USEC);
++		printf("SWEET SDHC: probe: %u KiB read at mid-partition: %d in %llu us (%s)\n",
++		    XFER_MAX >> 10, error, ns / NSEC_PER_USEC, sd.mode);
++		/* 4 MiB in XFER_MAX pieces: sustained rate through the strategy-sized path */
++		uint64_t sect = sd.first + sd.nsectors / 4;
++		t0 = mach_absolute_time();
++		for (uint32_t i = 0; !error && i < (4u << 20) / XFER_MAX; i++) {
++			error = sd_read_sectors(sect + i * (XFER_MAX / SECTOR), XFER_MAX / SECTOR);
++		}
++		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++		printf("SWEET SDHC: probe: 4 MiB read: %d in %llu ms = %llu KiB/s\n", error,
++		    ns / NSEC_PER_MSEC, ns ? (4096ull * NSEC_PER_SEC) / ns : 0);
+ 	}
+ 	lck_mtx_unlock(&sweet_sdhc_lock);
+ }
