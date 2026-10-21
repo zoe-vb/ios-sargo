@@ -29,6 +29,8 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   xnu-kernel/kernel.development.sweet shim/out/sargo/sargo-x01.adt shim/out/sargo/payload-x01.bin --cmdline
   "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0" && PATH=/opt/local/bin:$PATH BOARD=sargo
   LLVM=1 shim/build.sh ../shim/out/sargo/payload-x01.bin`. Details: docs/SARGO.md "First XNU boot".
+- **iOS root install plan: `docs/SARGO-INSTALL.md`** (2026-10-21). Nothing erased yet. Root goes into userdata
+  (only partition >= 16 GiB); erase step needs the owner's explicit yes after backup + Google account removal (FRP).
 - **eMMC 8-bit HS52 (x11, patch 0084 `2449cc1`, `xnu-kernel-0084/`): 36796 KiB/s** sustained 4 MiB read (user
   report), up from ~2900 KiB/s. Still read-only. Next: write path + iOS root into userdata (destructive: ask first).
 - **XNU eMMC driver works on sargo (x10, patch 0083 `b8214e9`, CI 39680874352, kernel in `xnu-kernel-0083/`)**:
