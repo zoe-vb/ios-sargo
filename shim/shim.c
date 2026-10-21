@@ -413,9 +413,12 @@ static void __attribute__((noreturn)) board_bringup(uintptr_t dtb)
 	con_skip();
 	stage = "psci";
 	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
+	/* SMP and GIC passed on sargo (docs/SARGO.md stage 1); -DBRINGUP_ALL reruns them */
+#ifdef BRINGUP_ALL
 	test_smp();
 	con_skip();
 	test_gic();
+#endif
 	con_skip();
 	stage = "emmc";
 	test_emmc();
