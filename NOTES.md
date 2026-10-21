@@ -18,7 +18,13 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   switching to a gzip kernel (uncompressed hangs ABL). Full results: docs/SARGO.md "Stage 1 results".
   Key: XNU RAM = high bank 0x1_00000000 + 0x7e2c0000; 8 cores via PSCI; GIC/timer as sweet; eMMC host
   deinitialised by ABL (SD clock off) -> driver must re-init the card.
-- Next: mkadt.py sargo board, then shim eMMC re-init + read-only GPT read (stage 3 de-risk), then XNU ramdisk boot.
+- Same evening: `mkadt.py --board sargo` (1077630; sweet ADT byte-identical). Shim eMMC read test took 6
+  boots (commits 994fc99..ff626aa): **ADMA2 block reads work** (EXT_CSD + GPT, userdata found, user-reported;
+  no photo of the final numbers). PIO is broken on this msm wrapper (buffer port never advances). Details and
+  driver conclusions: docs/SARGO.md "eMMC bring-up in the shim".
+- Next: XNU stage 2 (ramdisk root, no storage) needs a kernel: this Mac has no `xnu/out/` and no `gh`; kernels
+  build on GitHub Actions (`.github/workflows/xnu.yml`). Then an XNU sdhc driver (port of shim/emmc.c to the
+  sweet_ufs.c block interface).
 
 ## Agent handoff / active work (2026-10-15, latest)
 

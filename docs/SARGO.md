@@ -44,6 +44,24 @@ postmarketOS layout) it answers `Booting OKAY` after 3.8 s and the shim runs. Al
   -> ABL deinitialised the host. The driver must re-initialise the bus (clock, power, width, timing).
   Whether the card itself is still in transfer state is unknown; CMD0 re-init is the safe path.
 
+## eMMC bring-up in the shim (2026-10-21, boots 2-7)
+
+Read-only test in `shim/emmc.c` (no CMD6, no writes). What it took, in order:
+
+| Boot | Finding | Fix |
+|---|---|---|
+| 2 | Card answers: OCR `0xc0ff8080` (ready, sector mode), CID Micron (`0x13`) `S0J9K8`; CMD9 timed out with no status | (wrong theory: slow clock) |
+| 3 | GCC SDCC1 apps RCG cfg `0x201` = GPLL6 / 1 = **384 MHz** (ABL's HS400 rate, kept); SDHCI divider 480 -> 400 kHz ident, 8 -> 24 MHz; CMD9 ok; EXT_CSD: read-ready but no transfer-complete | |
+| 4 | msm v5 vendor regs are at `0x200+` (DLL_CONFIG `0x200`, VENDOR_SPEC `0x20c`, PWRCTL `0x240..0x24c`), not `0xdc`: with them the BUS_ON power IRQ (`0x2`) is seen and acked. ABL vendor spec `0x300a0c` (HS400 select-in field), DLL already in reset/PDN | default select like `msm_hc_select_default()` |
+| 5 | After Linux-like start (stale power IRQ service, vendor spec POR `0xa9c`, SOFTWARE_RESET_ALL) every command works, no retries | |
+| 5-6 | **PIO buffer port reads return word 0 forever** (LBA 1: "EFI " in words 0 and 1, EXT_CSD all 0; buffer-read-enable stays set, no transfer-complete) | use DMA |
+| 7 | **32-bit ADMA2, one descriptor, MMU/caches off, no SMMU setup: works.** EXT_CSD and GPT read, `userdata` found (reported by the user; exact LBA range not photographed) | |
+
+Conclusions for the XNU driver: re-init from scratch (reset, POR vendor spec, power IRQ ack,
+CMD0..7) at the 384 MHz base with the SDHCI divider, 1-bit legacy speed first; data by ADMA2
+only; the SDCC1 stream needs no SMMU programming (bypass). Faster modes (8-bit, HS52/DDR,
+HS200 with tuning) and the exact userdata range are still open.
+
 ## Stage plan
 
 1. **Shim stage 1** (`BOARD=sargo shim/build.sh`): boots via `fastboot boot`, draws on
@@ -87,7 +105,8 @@ shows how far it got (the eMMC dump runs last because it can hang if the SDCC cl
 
 ## Open questions
 
-- Does ABL leave the eMMC host clocked and the card in transfer state after `fastboot boot`?
+- ~~Does ABL leave the eMMC host clocked and the card in transfer state?~~ Clocked at 384 MHz, host
+  deinitialised; a full re-init works (see above).
 - Exact `/memory` layout: how much contiguous RAM is above the carve-outs (the iPhone X has 3 GB)?
 - A/B: `userdata` is shared between slots; the iOS root goes there the same way as on sweet,
   **only after** explicit approval (it erases Android user data).
