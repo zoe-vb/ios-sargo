@@ -2,7 +2,9 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--board sargo]
+
+--board sargo: Google Pixel 3a (SDM670), values from its stage-1 boot (docs/SARGO.md).
 """
 import hashlib, os, struct, sys
 
@@ -39,6 +41,23 @@ VTIMER_INTID = 19
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
 
+# Per-board differences. 'sweet' is the original tree; sargo values are
+# observed on the phone (docs/SARGO.md "Stage 1 results").
+BOARDS = {
+    'sweet': dict(
+        compatible=['xiaomi,sweet', 'qcom,sm7150'], fb_h=2400, fb_size=0x1700000,
+        cpu_compatible='qcom,kryo470', cpu_hz=(1804800000, 2304000000),
+        storage=('sweet-ufs', 'qcom,ufshc', UFS, UFS_SIZE)),
+    'sargo': dict(
+        # 'xiaomi,sweet' stays first: SweetPlatformExpert matches it
+        compatible=['xiaomi,sweet', 'google,sargo', 'qcom,sdm670'], fb_h=2220, fb_size=0x2400000,
+        cpu_compatible='qcom,kryo360', cpu_hz=(1708800000, 2016000000),
+        # live /memory bank 1; every fixed carve-out is in the low bank
+        highmem=(0x100000000, 0x7e2c0000),
+        # sdhc_1 hc_mem + cqhci; no XNU driver yet
+        storage=('sweet-sdhc', 'qcom,sdhci-msm-v5', 0x007c4000, 0x2000)),
+}
+
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 
 # The iOS userland is the iPhone X (iPhone10,3 / D22AP) IPSW. MobileGestalt
@@ -74,9 +93,12 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
+def build(seed=None, qemu=False, highmem=False, board='sweet'):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
+    b = BOARDS[board]
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
+    if 'highmem' in b:
+        phys_base, mem_size = b['highmem']
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -138,7 +160,7 @@ def build(seed=None, qemu=False, highmem=False):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo470') + cstr('ARM,v8')),
+            ('compatible', cstr(b['cpu_compatible']) + cstr('ARM,v8')),
             ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
@@ -149,7 +171,7 @@ def build(seed=None, qemu=False, highmem=False):
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2304000000 if core >= 6 else 1804800000)),
+            ('clock-frequency', u32(b['cpu_hz'][1] if core >= 6 else b['cpu_hz'][0])),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -191,17 +213,19 @@ def build(seed=None, qemu=False, highmem=False):
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
+        ('reg', u64(FB, b['fb_size'])),
         ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
+        ('height', u32(b['fb_h'])),
         ('stride', u32(FB_STRIDE)),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
-    ufs = node('sweet-ufs', [
+    # sargo: the eMMC host instead (ABL deinitialises it; driver to come).
+    sname, scompat, sreg, ssize = b['storage']
+    ufs = node(sname, [
         ph(),
-        ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(UFS, UFS_SIZE)),
+        ('compatible', cstr(scompat)),
+        ('reg', u64(sreg, ssize)),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -231,7 +255,7 @@ def build(seed=None, qemu=False, highmem=False):
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + b''.join(cstr(c) for c in b['compatible']) + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
@@ -242,7 +266,8 @@ def build(seed=None, qemu=False, highmem=False):
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    board = sys.argv[sys.argv.index('--board') + 1] if '--board' in sys.argv else 'sweet'
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, board=board)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
