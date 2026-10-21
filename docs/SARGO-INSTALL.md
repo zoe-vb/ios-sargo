@@ -157,6 +157,11 @@ launchd_unsecure_cache=1 wdt=-1` (no sdhcrw/sdhcwtest/rootrw, checked in the pay
 SystemVersion.plist). = the expected read-only stop: launchd ran iOS's /sbin/mount, whose
 read-write remount of / cannot succeed without rootrw (same as sweet boot 0036).
 
+**4b booted 2026-10-21 ~23:50 as x14** (owner: "just let iOS try and write as a quick test"):
+x13 + `sdhcrw=1 sdhcwtest=1`, still no `rootrw` (root mounted read-only; iOS's `mount -u`
+may now remount it read-write since the device accepts writes). The driver's partition-bounds
+guard still applies to every write. Booting OKAY.
+
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
 - **4a** `rd=sdhcroot0` without `sdhcrw`: expect `hfs: mounted ... on device` and then
