@@ -1,0 +1,105 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -494,6 +494,9 @@
+ 
+ #if DEBUG_BSDINIT
+ #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
++#elif defined(SWEET)
++/* sweet: boot-thread progress on the screen console (sargo hangs in here) */
++#define bsd_init_kprintf(x, ...) printf("bsd_init: " x, ## __VA_ARGS__)
+ #else
+ #define bsd_init_kprintf(x, ...)
+ #endif
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -69,6 +69,10 @@
+ #include <kern/clock.h>
+ #include <sys/time.h>
+ 
++#if defined(SWEET)
++extern "C" uint32_t sweet_timer_irqs;   /* pexpert/arm/pe_serial.c, timer IRQ count */
++#endif
++
+ void
+ IOKitInitializeTime( void )
+ {
+@@ -77,17 +81,32 @@
+ 	t.tv_sec = 30;
+ 	t.tv_nsec = 0;
+ 
++#if defined(SWEET)
++	/* sargo hangs here: show the timer state before and after the timed wait */
++	__builtin_arm_isb(0xf);         /* SY */
++	IOLog("SWEET BOOT: IORTC wait (30 s) start: irqs %u ctl 0x%llx tval 0x%llx cnt 0x%llx\n",
++	    (unsigned)sweet_timer_irqs, __builtin_arm_rsr64("CNTV_CTL_EL0"),
++	    __builtin_arm_rsr64("CNTV_TVAL_EL0"), __builtin_arm_rsr64("CNTVCT_EL0"));
++#endif
+ // RTC is not present on this target
+ #ifndef BCM2837
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IORTC"), &t );
+ #endif
++#if defined(SWEET)
++	__builtin_arm_isb(0xf);
++	IOLog("SWEET BOOT: IORTC wait done: irqs %u cnt 0x%llx\n",
++	    (unsigned)sweet_timer_irqs, __builtin_arm_rsr64("CNTVCT_EL0"));
++#endif
+ #if defined(__i386__) || defined(__x86_64__)
+ 	IOService::waitForService(
+ 		IOService::resourceMatching("IONVRAM"), &t );
+ #endif
+ 
+ 	clock_initialize_calendar();
++#if defined(SWEET)
++	IOLog("SWEET BOOT: calendar initialized\n");
++#endif
+ }
+ 
+ void
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1868,6 +1868,8 @@
+ 		return; /* spurious */
+ 	}
+ 	if (intid == sweet_vtimer_intid) {
++		extern void sweet_timer_heartbeat(void);
++		sweet_timer_heartbeat();
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
+ 		cdp->cpu_decrementer = -1; /* Large */
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -842,6 +842,33 @@
+ 	}
+ }
+ 
++/*
++ * Timer heartbeat (sweet_boot_progress, patch 0082): every virtual timer
++ * IRQ repaints a 48x48 square in the top right corner with a new colour.
++ * A changing corner = timer interrupts arrive; a frozen one = they don't.
++ * Called from the IRQ handler: a few aligned stores, no locks.
++ */
++extern uint32_t sweet_timer_irqs;
++uint32_t sweet_timer_irqs;
++
++void sweet_timer_heartbeat(void);
++
++void
++sweet_timer_heartbeat(void)
++{
++	uint32_t n = __atomic_add_fetch(&sweet_timer_irqs, 1, __ATOMIC_RELAXED);
++	if (fbcon_base == NULL || fbcon_width < 64) {
++		return;
++	}
++	uint32_t colour = 0xff000000u | ((n * 0x9e3779b9u) & 0x00ffffffu) | 0x00404040u;
++	for (uint32_t y = 8; y < 56; y++) {
++		volatile uint32_t *line = fbcon_base + y * (fbcon_stride / 4);
++		for (uint32_t x = fbcon_width - 56; x < fbcon_width - 8; x++) {
++			line[x] = colour;
++		}
++	}
++}
++
+ #if HIBERNATION
+ /**
+  * Transitions the serial driver into a mode that can be run in the hibernation
