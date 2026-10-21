@@ -145,6 +145,13 @@ fastboot -S 256M flash userdata ios16-root-sargo.img
 `-S 256M` matches this ABL's `max-download-size` (0x10000000). Over USB 2 expect
 roughly 10–15 minutes; do not unplug. This touches `userdata` only.
 
+**Stage 3 done by the owner (2026-10-21, after the image build): `userdata` flashed with
+`ios16-root-sargo.img`.** Android's user data is gone from here on.
+
+**4a booted 2026-10-21 23:46 as x13**: 0085 kernel + `sargo-x13.adt` (with `/product`), cmdline
+`... rd=sdhcroot0 sdhcprobe=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin
+launchd_unsecure_cache=1 wdt=-1` (no sdhcrw/sdhcwtest/rootrw, checked in the payload): Booting OKAY.
+
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
 - **4a** `rd=sdhcroot0` without `sdhcrw`: expect `hfs: mounted ... on device` and then
