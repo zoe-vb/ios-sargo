@@ -14,6 +14,8 @@
 # image; flash it with `fastboot -S 256M flash userdata OUT.img` (ERASES
 # userdata: only with the owner's explicit yes, see docs/SARGO-INSTALL.md).
 set -euo pipefail
+# /bin/bash on macOS is 3.2: "${a[@]}" of an EMPTY array is an unbound
+# variable under set -u there, so every array expansion uses ${a[@]+"${a[@]}"}.
 
 usage() { sed -n '2,15p' "$0"; exit 2; }
 tweaks=1
@@ -52,7 +54,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(cd "$(mktemp -d /tmp/mkiosroot.XXXXXX)" && pwd -P)
 devs=()
 cleanup() {
-	for d in "${devs[@]}"; do
+	for d in ${devs[@]+"${devs[@]}"}; do
 		hdiutil detach "$d" -force >/dev/null 2>&1 || true
 	done
 	rm -f "$work/root.sparseimage"
@@ -69,7 +71,7 @@ attach() {
 		class=(-imagekey diskimage-class=CRawDiskImage)
 	fi
 	local dev
-	dev=$(hdiutil attach "${class[@]}" -readonly -nobrowse -noverify -owners on \
+	dev=$(hdiutil attach ${class[@]+"${class[@]}"} -readonly -nobrowse -noverify -owners on \
 	    -mountpoint "$mnt" "$img" | awk 'NR==1 {print $1}')
 	devs+=("$dev")
 	[[ $(mount) == *" on $mnt "* ]] || { echo "could not mount $img at $mnt" >&2; exit 1; }
@@ -83,7 +85,7 @@ hdiutil create -size "$size" -type SPARSE -layout NONE -fs "Case-sensitive Journ
 mkdir "$work/root"
 rdev=$(hdiutil attach -nobrowse -owners on -mountpoint "$work/root" "$work/root.sparseimage" |
     awk 'NR==1 {print $1}')
-devs=("$rdev" "${devs[@]}")
+devs=("$rdev" ${devs[@]+"${devs[@]}"})
 R=$work/root
 # Keep macOS bookkeeping (Spotlight, fseventsd) off the iOS volume.
 touch "$R/.metadata_never_index"
@@ -150,14 +152,14 @@ rm -rf "$R/.fseventsd" "$R/.Spotlight-V100" "$R/.Trashes" "$R/.TemporaryItems" \
 df -h "$R"
 sync
 hdiutil detach "$rdev" >/dev/null
-devs=("${devs[@]:1}")
+devs=(${devs[@]+"${devs[@]:1}"})
 
 # Verify the volume, then write the raw image.
 vdev=$(hdiutil attach -nomount -readonly "$work/root.sparseimage" | awk 'NR==1 {print $1}')
-devs=("$vdev" "${devs[@]}")
+devs=("$vdev" ${devs[@]+"${devs[@]}"})
 fsck_hfs -fn "$vdev"
 hdiutil detach "$vdev" >/dev/null
-devs=("${devs[@]:1}")
+devs=(${devs[@]+"${devs[@]:1}"})
 hdiutil convert "$work/root.sparseimage" -format UDTO -o "$work/root.cdr" >/dev/null
 mv "$work/root.cdr" "$out"
 shasum -a 256 "$out" | tee "$out.sha256"
