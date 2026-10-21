@@ -98,6 +98,11 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   `bl IOService::waitForService` in `IOKitInitializeTime` (VA 0xfffffe00079abf90, file offset
   0x9a7f90, `0x94005459`) replaced by `nop`, i.e. no 30 s IORTC wait. Getting further means timed
   waits (timer deadlines) are what hangs.
+- Patch 0082 (`01e9a01`): CI on the fork `zoe-vb/ios-sargo`, run 39676062416, success (commit
+  ea35805), artifact in `xnu-kernel-0082/` (gitignored). x07 = 0082 kernel, cmdline
+  `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0`: Booting OKAY.
+  Watch for: heartbeat square top right (timer IRQs), `bsd_init: calling ...` steps,
+  `SWEET BOOT: IORTC wait ... start/done`.
 
 ## Stage plan
 
