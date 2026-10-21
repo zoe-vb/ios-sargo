@@ -6,6 +6,8 @@
 #   mkbootimg: AOSP's if on PATH, else tools/mkbootimg.py
 #   HEADER=v1|v2 (sargo default v1: stock Pixel 3a boot.img, DTB appended to the kernel)
 #   KGZ=1: gzip the kernel before appending the DTB (v1 only)
+#   EMBED=1: append the xnu payload to the Image (image_size covers it) instead of using it
+#     as the ramdisk (sargo default: ABL's ramdisk slot ends 16 MiB later at hyp_region)
 set -euo pipefail
 cd "$(dirname "$0")"
 BOARD=${BOARD:-sweet}
@@ -14,7 +16,7 @@ sweet) BDEF=; DTB=${DTB:-../dtb/boot_unpacked/dtb}; HEADER=${HEADER:-v2}
 	DRV=ufs.c; OS_VERSION=17.0.0; PATCH_LEVEL=2035-06 ;;
 sargo) BDEF=-DBOARD_SARGO; DTB=${DTB:-../dtb/sargo/dtb}; HEADER=${HEADER:-v1}
 	# ABL b4s4-0.1-5653622 hangs on "fastboot boot" of an uncompressed Image-dtb
-	KGZ=${KGZ-1}
+	KGZ=${KGZ-1}; EMBED=${EMBED-1}
 	DRV=emmc.c; OS_VERSION=${OS_VERSION:-9.0.0}; PATCH_LEVEL=${PATCH_LEVEL:-2019-03} ;;	# = stock boot.img header
 *) echo "unknown BOARD=$BOARD" >&2; exit 1 ;;
 esac
@@ -56,6 +58,18 @@ size=$(( 0x$($NM $OUT/shim.elf | awk '$3=="_end"{print $1}') ))
 python3 -c 'import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))' $OUT/Image "$size"
 # Ramdisk: an xnu payload (tools/mkpayload.py) if given as $1, else an empty
 # newc cpio (ABL dislikes a zero-size ramdisk on some builds) -> diagnostics.
+if [ -n "${1:-}" ] && [ -n "${EMBED:-}" ]; then
+	# payload 4K-aligned after the zero-padded image; header image_size grows to cover it
+	python3 - $OUT/Image "$1" <<'PY'
+import struct, sys
+img, pay = bytearray(open(sys.argv[1], 'rb').read()), open(sys.argv[2], 'rb').read()
+img += b'\0' * (-len(img) % 0x1000) + pay
+img += b'\0' * (-len(img) % 0x1000)
+struct.pack_into('<Q', img, 0x10, len(img))
+open(sys.argv[1], 'wb').write(img)
+PY
+	set -- ""
+fi
 if [ -n "${1:-}" ]; then
 	cp "$1" $OUT/ramdisk.bin
 else

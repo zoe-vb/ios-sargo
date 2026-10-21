@@ -2,7 +2,8 @@
  * Milestone 4: act as iBoot for xnu.
  *
  * mkpayload.py already resolved the kernel's chained fixups and built the
- * ADT, so this only has to: find the payload in the ABL ramdisk, copy the
+ * ADT, so this only has to: find the payload (in the ABL ramdisk, or on
+ * sargo appended to our own Image, see build.sh EMBED), copy the
  * segments to phys_base + (vmaddr - virt_base), place the ADT and
  * boot_args behind the kernel, and jump to the entry point with the MMU
  * and caches off, x0 = boot_args (physical).
@@ -77,6 +78,8 @@ static int magic_ok(const char *m)
 
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
+extern char _end[];
+
 #ifndef BOARD_SWEET
 static uint64_t now(void)
 {
@@ -124,8 +127,19 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
 	const struct payload *p = (const struct payload *)rd_start;
-	if (!magic_ok(p->magic))
-		return "no SWEETXNU payload";
+	if (!magic_ok(p->magic)) {
+		/*
+		 * sargo: ABL puts the ramdisk at 0x84700000, 16 MiB below hyp_region;
+		 * a 16 MiB payload there reset the SoC. build.sh EMBED appends it to
+		 * the Image instead, 4K-aligned after _end (image_size covers it).
+		 */
+		rd_start = ((uintptr_t)_end + 0xfff) & ~0xfffUL;
+		p = (const struct payload *)rd_start;
+		if (!magic_ok(p->magic))
+			return "no SWEETXNU payload";
+		rd_end = rd_start + p->adt_off + p->adt_size;
+		con_hex2("EMBED", "lo=", rd_start, "hi=", rd_end);
+	}
 	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
 		return "bad payload header";
 
