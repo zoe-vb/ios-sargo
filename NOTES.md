@@ -12,11 +12,13 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
 - Verified on this Mac only: both boards compile with Apple clang `--target=aarch64-none-elf`
   (no absolute relocations once `-fno-jump-tables` is set, now in the LLVM=1 path); fdt_prop
   tested on a synthetic sargo-like FDT; the appended-DTB extraction was tested on a synthetic v1 image.
-- NOT done: link + mkbootimg (this Mac has no ld.lld/llvm-objcopy/mkbootimg/fastboot), boot on the phone.
-  Header v1 + appended DTB for sargo is a guess (Pixel 3a ships Image.lz4-dtb); check
-  `dtb/sargo/header.txt` from the stock boot.img.
-- Next: get the stock sargo boot.img -> `dtb/sargo/dtb`, build, `fastboot boot`, photograph the
-  stage-1 screen, then the sargo ADT memory map in `mkadt.py` (docs/SARGO.md stage 2).
+- 2026-10-21 evening: built on this Mac (Apple clang + MacPorts aarch64-elf-binutils + tools/mkbootimg.py,
+  `PATH=/opt/local/bin:$PATH BOARD=sargo LLVM=1 shim/build.sh`), stock boot.img in backup/sargo-boot.img
+  (header v1, Android 9 2019-03, ABL b4s4-0.1-5653622). **Stage 1 booted and completed** on the phone after
+  switching to a gzip kernel (uncompressed hangs ABL). Full results: docs/SARGO.md "Stage 1 results".
+  Key: XNU RAM = high bank 0x1_00000000 + 0x7e2c0000; 8 cores via PSCI; GIC/timer as sweet; eMMC host
+  deinitialised by ABL (SD clock off) -> driver must re-init the card.
+- Next: mkadt.py sargo board, then shim eMMC re-init + read-only GPT read (stage 3 de-risk), then XNU ramdisk boot.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

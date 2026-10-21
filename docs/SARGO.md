@@ -21,8 +21,28 @@ Sources: `arch/arm64/boot/dts/qcom/sdm670.dtsi`, `sdm670-google-common.dtsi`,
 | Keys | power = PM660 PON pwrkey, vol down = PON resin, **vol up = PM660L GPIO 7** | partly (PMIC differs) |
 | PMICs | PM660 + PM660L over SPMI (`0xc440000`) | **no** (PM6150 family) |
 | Panel | Samsung S6E3FA7 (AMS559NK06) OLED, left on by ABL | no |
-| RAM | 4 GB; `/memory` is filled in by ABL: **read on device (stage 1)** | no (6/8 GB) |
+| RAM | 4 GB. Live `/memory` (stage 1): `0x80000000+0x80000000`, `0x1_00000000+0x7e2c0000`. The high bank has no carve-outs and becomes XNU RAM (~1.97 GB) | no (6/8 GB) |
 | Fixed carve-outs | hyp `0x85700000` ... qseecom `0x9e400000`, debug-info `0xa1800000`; modem/ADSP etc. moved to `0x8b000000`..`0x97a17000` on Google boards | different |
+
+## Stage 1 results (2026-10-21, boot 0001, photo kept off git)
+
+ABL `b4s4-0.1-5653622` (2019 launch), stock boot.img = Android 9 / 2019-03, header v1, one
+appended DTB. **`fastboot boot` of an uncompressed Image-dtb hangs ABL** (no OKAY/FAIL, the
+UI stays responsive, fastboot stops answering). With a gzip kernel (`Image.gz-dtb`, the
+postmarketOS layout) it answers `Booting OKAY` after 3.8 s and the shim runs. All lines observed on screen:
+
+- live FDT model `Google Inc. MSM sdm670 S4 PVT v1.0`, qcom,board-id `0x41e05 0` (dtbo overlay applied)
+- initrd at `0x84700000`, DTB at `0x84500000`
+- IMEM restart reason `0x146bf65c` (found in the FDT)
+- boot CPU MIDR `0x517f803c` (Kryo 360 Silver), MPIDR `0x81000000` (MT bit set, Aff1 = core)
+- ID_AA64MMFR0 PARange 2 (40 bit), TGran16 = 1 (16K pages supported), CNTFRQ 19.2 MHz, EL1
+- PSCI 1.1, SMCCC_VERSION not supported (-1); CPU_ON ok for all 7, MPIDRs `0x81000100`..`0x81000700`
+- GICD CTLR `0x10 -> 0x12`, GICR for CPU0 at `0x17a60000`, vtimer 30 IRQs / 300 ms, SGI 10/10
+- sdhc_1: SDHCI version `0x6c02` (spec 3.0), CAPS `0x742dcbb2 / 0x0000808f` (ADMA2, 64-bit,
+  base clock field 0xcb), PRESENT `0x01f800f0` (card inserted, DAT lines idle), CLOCK `0x3`
+  (internal clock on and stable, **SD clock off**), host ctl/ctl2/int-enable all 0, CQHCI 5.10 disabled.
+  -> ABL deinitialised the host. The driver must re-initialise the bus (clock, power, width, timing).
+  Whether the card itself is still in transfer state is unknown; CMD0 re-init is the safe path.
 
 ## Stage plan
 
@@ -30,7 +50,7 @@ Sources: `arch/arm64/boot/dts/qcom/sdm670.dtsi`, `sdm670-google-common.dtsi`,
    the splash framebuffer and reads the live FDT. It shows the model and board-id,
    the `/memory` banks, the IMEM restart reason, MIDR/MPIDR, 16K granule support,
    PSCI, SMP (CPU_ON for all 7 secondaries), GIC timer and SGI interrupts, and a
-   read-only dump of the eMMC host registers. Photograph the screen. **Status: written, not built or booted yet.**
+   read-only dump of the eMMC host registers. Photograph the screen. **Status: done, see results above.**
 2. **ADT for sargo**: `mkadt.py` board table: memory range (from stage 1), 1080x2220
    fbcon, CPU frequencies (A55 1.7 GHz, A75 2.0 GHz), compatible `google,sargo`, `sweet-sdhc`
    node in place of `sweet-ufs`. Boot XNU to the framebuffer console with a ramdisk root
