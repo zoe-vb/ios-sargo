@@ -29,6 +29,12 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   xnu-kernel/kernel.development.sweet shim/out/sargo/sargo-x01.adt shim/out/sargo/payload-x01.bin --cmdline
   "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0" && PATH=/opt/local/bin:$PATH BOARD=sargo
   LLVM=1 shim/build.sh ../shim/out/sargo/payload-x01.bin`. Details: docs/SARGO.md "First XNU boot".
+- **sargo XNU hang (x03..x06):** stops on the boot thread after IOKit finishes (x05 `io=0xd` trace clean),
+  presumably in the silent 30 s IORTC wait in IOKitInitializeTime; `wfi=0` (x04) does not help. x06 = binary
+  patch removing that wait (result pending at handoff). **Patch 0082** (`01e9a01`): timer-IRQ heartbeat square
+  (top right) + bsd_init progress + timer registers around the wait. Fork for CI builds: `zoe-vb/ios-sargo`
+  (remote `sargo`, SSH works as zoe-vb); `main` there = `sargo-port`. Actions must be enabled on the fork
+  first (no run started on push); then run workflow "xnu" on main, download artifact `xnu-kernel`.
 - Older note (kernel now available in xnu-kernel/, gitignored): XNU stage 2 needed a kernel: this Mac has no `xnu/out/` and no `gh`; kernels
   build on GitHub Actions (`.github/workflows/xnu.yml`). Then an XNU sdhc driver (port of shim/emmc.c to the
   sweet_ufs.c block interface).
