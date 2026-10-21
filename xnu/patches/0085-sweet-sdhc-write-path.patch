@@ -1,0 +1,349 @@
+--- a/bsd/dev/sweet_sdhc.c
++++ b/bsd/dev/sweet_sdhc.c
+@@ -28,7 +28,11 @@
+  * brings the card up early in IOFindBSDRoot and logs what it found (card,
+  * partition, filesystem signature) without changing the root device.
+  *
+- * READ ONLY: there is no write path. Opening for writing fails with EROFS.
++ * Writes are refused unless boot-arg sdhcrw=1 is set. sd_write_sectors() is
++ * the only place data goes to the card, and it checks again, right before
++ * the command, that the whole range lies inside the named partition.
++ * boot-arg sdhcwtest=1 (with sdhcrw=1) writes and restores one sector 16 GiB
++ * + 1 MiB into the partition, past the end of the 16 GiB root image.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -123,6 +127,8 @@
+ #define HCTL_8BIT               (1u << 5)
+ 
+ /* EXT_CSD */
++#define EXT_CSD_FLUSH_CACHE     32
++#define EXT_CSD_CACHE_CTRL      33
+ #define EXT_CSD_BUS_WIDTH       183
+ #define EXT_CSD_HS_TIMING       185
+ #define EXT_CSD_DEVICE_TYPE     196
+@@ -131,6 +137,8 @@
+ #define R1_SWITCH_ERROR         (1u << 7)
+ #define R1_STATE(r)             (((r) >> 9) & 0xf)
+ #define R1_STATE_TRAN           4
++#define R1_ERRORS               0xfff80000u     /* out of range .. CID/CSD overwrite */
++#define WTEST_OFFSET            ((16ull << 30) + (1ull << 20))  /* bytes into the partition */
+ 
+ #define XFER_DMA                (1u << 0)
+ #define XFER_BCE                (1u << 1)
+@@ -170,6 +178,8 @@
+ 	dev_t bdev;
+ 	int init_error;                         /* -1: not tried yet */
+ 	bool ready;
++	bool writable;                          /* boot-arg sdhcrw=1 */
++	bool cache_on;                          /* EXT_CSD CACHE_CTRL: flush on synchronize */
+ } sd = { .init_error = -1, .mode = "1-bit legacy" };
+ 
+ static LCK_GRP_DECLARE(sweet_sdhc_grp, "sweet_sdhc");
+@@ -336,9 +346,13 @@
+ 	return 0;
+ }
+ 
+-/* Read count 512-byte units (count <= XFER_MAX / 512) by ADMA2 into the bounce buffer. */
++/*
++ * Move count 512-byte units (count <= XFER_MAX / 512) by ADMA2 between the card
++ * and the bounce buffer. Writes then wait until the card has programmed the
++ * data (CMD13 back in tran) and check its error bits.
++ */
+ static int
+-sd_read(unsigned idx, uint32_t arg, uint32_t count)
++sd_xfer(unsigned idx, uint32_t arg, uint32_t count, bool write)
+ {
+ 	if (count == 0 || count > XFER_MAX / SECTOR) {
+ 		return EINVAL;
+@@ -350,27 +364,62 @@
+ 	desc[1] = (uint32_t)buf;
+ 	desc[2] = (uint32_t)(buf >> 32);
+ 	clean_dcache64((addr64_t)(sd.dma_pa + DMA_DESC), 16, TRUE);
+-	flush_dcache64((addr64_t)buf, len, TRUE);       /* no dirty lines over the DMA */
++	/* write: the data must be in memory; read: no dirty lines over the DMA */
++	flush_dcache64((addr64_t)buf, len, TRUE);
+ 	uint64_t desc_pa = sd.dma_pa + DMA_DESC;
+ 	sd_wr(SDHCI_ADMA_ADDRESS, (uint32_t)desc_pa);
+ 	sd_wr(SDHCI_ADMA_ADDRESS + 4, (uint32_t)(desc_pa >> 32));
+ 	sd_wr(SDHCI_HOST_CONTROL, (sd_rd(SDHCI_HOST_CONTROL) & ~(3u << 3)) | HCTL_ADMA2_64);
+ 	sd_wr(SDHCI_BLOCK_SIZE, count << 16 | SECTOR);
+-	unsigned xfer = XFER_DMA | XFER_READ;
++	unsigned xfer = XFER_DMA | (write ? 0 : XFER_READ);
+ 	if (count > 1) {
+-		/* msm: SDHCI_QUIRK_MULTIBLOCK_READ_ACMD12 */
++		/* msm: SDHCI_QUIRK_MULTIBLOCK_READ_ACMD12; writes stop the same way */
+ 		xfer |= XFER_BCE | XFER_MULTI | XFER_ACMD12;
+ 	}
+ 	int error = sd_cmd(idx, arg, R1 | CMD_DATA, xfer);
+-	flush_dcache64((addr64_t)buf, len, TRUE);       /* drop lines fetched during the DMA */
++	uint32_t r1 = sd_rd(SDHCI_RESPONSE);
++	if (!write) {
++		flush_dcache64((addr64_t)buf, len, TRUE);       /* drop lines fetched during the DMA */
++	}
+ 	if (error && (sd.last_int & INT_ADMA_ERROR)) {
+ 		printf("SWEET SDHC: ADMA error 0x%x at desc 0x%x%08x\n", sd_rd(SDHCI_ADMA_ERROR),
+ 		    sd_rd(SDHCI_ADMA_ADDRESS + 4), sd_rd(SDHCI_ADMA_ADDRESS));
+ 	}
++	if (!error && write) {
++		if (r1 & R1_ERRORS) {
++			printf("SWEET SDHC: write CMD%u status 0x%x\n", idx, r1);
++			return EIO;
++		}
++		uint64_t end = deadline_ms(2000);
++		for (;;) {
++			if ((error = sd_cmd(13, RCA << 16, R1, 0))) {
++				return error;
++			}
++			r1 = sd_rd(SDHCI_RESPONSE);
++			if (r1 & R1_ERRORS) {
++				printf("SWEET SDHC: after write CMD%u: status 0x%x\n", idx, r1);
++				return EIO;
++			}
++			if (R1_STATE(r1) == R1_STATE_TRAN) {
++				break;
++			}
++			if (mach_absolute_time() > end) {
++				printf("SWEET SDHC: write not finished, state %u\n", R1_STATE(r1));
++				return ETIMEDOUT;
++			}
++			delay(50);
++		}
++	}
+ 	return error;
+ }
+ 
+ static int
++sd_read(unsigned idx, uint32_t arg, uint32_t count)
++{
++	return sd_xfer(idx, arg, count, false);
++}
++
++static int
+ sd_read_sectors(uint64_t lba, uint32_t count)
+ {
+ 	if (lba + count > sd.card_sectors || lba > UINT32_MAX) {
+@@ -379,6 +428,31 @@
+ 	return sd_read(count > 1 ? 18 : 17, (uint32_t)lba, count);
+ }
+ 
++/*
++ * The only place data goes to the card: card sectors [lba, lba + count) from
++ * the bounce buffer. The whole range must lie inside the partition.
++ */
++static int
++sd_write_sectors(uint64_t lba, uint32_t count)
++{
++	if (!sd.writable || !sd.nsectors || count == 0 || count > XFER_MAX / SECTOR ||
++	    lba < sd.first || lba - sd.first >= sd.nsectors ||
++	    count > sd.nsectors - (lba - sd.first) || lba + count > sd.card_sectors ||
++	    lba + count - 1 > UINT32_MAX) {
++		printf("SWEET SDHC: refusing write of %u sectors at 0x%llx\n", count, lba);
++		return EPERM;
++	}
++	return sd_xfer(count > 1 ? 25 : 24, (uint32_t)lba, count, true);
++}
++
++static int mmc_switch(unsigned index, unsigned value);
++
++static int
++sd_flush(void)
++{
++	return sd.cache_on ? mmc_switch(EXT_CSD_FLUSH_CACHE, 1) : 0;
++}
++
+ static const uint8_t *
+ bounce(void)
+ {
+@@ -563,6 +637,7 @@
+ 	}
+ 	uint8_t ext_csd[512];
+ 	memcpy(ext_csd, x, sizeof(ext_csd));
++	sd.cache_on = ext_csd[EXT_CSD_CACHE_CTRL] & 1;
+ 	sd_speed_up(ext_csd);
+ 	printf("SWEET SDHC: bus %s, card clock %u kHz requested (base %u kHz)\n",
+ 	    sd.mode, sd.bus_khz, sd.base_khz);
+@@ -639,7 +714,7 @@
+ 	if (!sd.ready) {
+ 		return ENXIO;
+ 	}
+-	return (flags & FWRITE) ? EROFS : 0;
++	return ((flags & FWRITE) && !sd.writable) ? EROFS : 0;
+ }
+ 
+ static int
+@@ -657,8 +732,10 @@
+ 	uint32_t count = buf_count(bp);
+ 	uint64_t part_bytes = sd.nsectors * SECTOR;
+ 
++	bool rd = buf_flags(bp) & B_READ;
++
+ 	buf_setresid(bp, count);
+-	if (!(buf_flags(bp) & B_READ)) {
++	if (!rd && !sd.writable) {
+ 		error = EROFS;
+ 		goto done;
+ 	}
+@@ -681,13 +758,26 @@
+ 		uint32_t skip = (uint32_t)(pos % SECTOR);
+ 		uint32_t want = MIN(count - done, XFER_MAX - skip);
+ 		uint32_t sectors = (skip + want + SECTOR - 1) / SECTOR;
+-		error = sd_read_sectors(sd.first + lba, sectors);
++		if (rd) {
++			error = sd_read_sectors(sd.first + lba, sectors);
++			if (!error) {
++				memcpy(vaddr + done, bounce() + skip, want);
++			}
++		} else {
++			/* Partial sectors at either end: read, merge, write back. */
++			if (skip || (want % SECTOR)) {
++				error = sd_read_sectors(sd.first + lba, sectors);
++			}
++			if (!error) {
++				memcpy((uint8_t *)(sd.dma + DMA_BOUNCE) + skip, vaddr + done, want);
++				error = sd_write_sectors(sd.first + lba, sectors);
++			}
++		}
+ 		if (error) {
+-			printf("SWEET SDHC: read of %u sectors at 0x%llx failed: %d, int 0x%x\n",
+-			    sectors, sd.first + lba, error, sd.last_int);
++			printf("SWEET SDHC: %s of %u sectors at 0x%llx failed: %d, int 0x%x\n",
++			    rd ? "read" : "write", sectors, sd.first + lba, error, sd.last_int);
+ 			break;
+ 		}
+-		memcpy(vaddr + done, bounce() + skip, want);
+ 		done += want;
+ 		buf_setresid(bp, count - done);
+ 	}
+@@ -724,16 +814,23 @@
+ 		*o = sd.nsectors;
+ 		return 0;
+ 	case DKIOCISWRITABLE:
+-		*f = 0;
++		*f = sd.writable;
+ 		return 0;
+ 	case DKIOCSYNCHRONIZE:
+-	case DKIOCSYNCHRONIZECACHE:
+-		return 0;
++	case DKIOCSYNCHRONIZECACHE: {
++		if (!sd.writable) {
++			return 0;
++		}
++		lck_mtx_lock(&sweet_sdhc_lock);
++		int error = sd_flush();
++		lck_mtx_unlock(&sweet_sdhc_lock);
++		return error;
++	}
+ 	case DKIOCGETMAXBLOCKCOUNTREAD:
+ 		*o = XFER_MAX / SECTOR;
+ 		return 0;
+ 	case DKIOCGETMAXBLOCKCOUNTWRITE:
+-		*o = 0;
++		*o = sd.writable ? XFER_MAX / SECTOR : 0;
+ 		return 0;
+ 	case DKIOCGETMAXSEGMENTCOUNTREAD:
+ 	case DKIOCGETMAXSEGMENTCOUNTWRITE:
+@@ -769,9 +866,12 @@
+ }
+ 
+ static int
+-sweet_sdhc_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++sweet_sdhc_write(dev_t dev, struct uio *uio, __unused int ioflag)
+ {
+-	return EROFS;
++	if (!sd.writable) {
++		return EROFS;
++	}
++	return physio(sweet_sdhc_strategy, NULL, dev, B_WRITE, minphys, uio, SECTOR);
+ }
+ 
+ static const struct bdevsw sweet_sdhc_bdevsw = {
+@@ -856,9 +956,14 @@
+ 	sd.bdev = makedev(sd.bmajor, 0);
+ 	devfs_make_node(sd.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdhcroot0");
+ 	devfs_make_node(makedev(sd.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdhcroot0");
++	/* Only now, with the partition bounds known, can writes be allowed. */
++	uint32_t rw = 0;
++	PE_parse_boot_argn("sdhcrw", &rw, sizeof(rw));
++	sd.writable = (rw != 0);
+ 	sd.ready = true;
+-	printf("SWEET SDHC: \"%s\": first sector 0x%llx, %llu MiB, read-only, DMA at 0x%llx\n",
+-	    want, sd.first, sd.nsectors >> 11, sd.dma_pa);
++	printf("SWEET SDHC: \"%s\": first sector 0x%llx, %llu MiB, %s, cache %s, DMA at 0x%llx\n",
++	    want, sd.first, sd.nsectors >> 11, sd.writable ? "read-write" : "read-only",
++	    sd.cache_on ? "on" : "off", sd.dma_pa);
+ 	return 0;
+ }
+ 
+@@ -888,6 +993,59 @@
+  * without using it as root. ext4 keeps its magic 0xef53 at byte 0x438, f2fs
+  * 0xf2f52010 at 0x400, HFS+ "H+"/"HX" at 0x400.
+  */
++/*
++ * boot-arg sdhcwtest=1: one sector WTEST_OFFSET into the partition (past the
++ * end of the 16 GiB root image): save it, write a pattern, read it back,
++ * write the saved contents back, read them back. Lock held by the caller.
++ */
++static void
++sd_write_test(void)
++{
++	uint64_t lba = sd.first + WTEST_OFFSET / SECTOR;
++	uint8_t saved[SECTOR], pattern[SECTOR];
++	uint8_t *b = (uint8_t *)(sd.dma + DMA_BOUNCE);
++
++	if (!sd.writable) {
++		printf("SWEET SDHC: write test needs sdhcrw=1\n");
++		return;
++	}
++	if (WTEST_OFFSET / SECTOR >= sd.nsectors) {
++		printf("SWEET SDHC: write test sector outside the partition\n");
++		return;
++	}
++	for (unsigned i = 0; i < SECTOR; i++) {
++		pattern[i] = (uint8_t)(i * 7 + 0x5a);
++	}
++	memcpy(pattern, "SWEET SDHC write test", 21);
++
++	int error = sd_read_sectors(lba, 1);
++	if (!error) {
++		memcpy(saved, b, SECTOR);
++		memcpy(b, pattern, SECTOR);
++		error = sd_write_sectors(lba, 1);
++	}
++	bool same = false;
++	if (!error && !(error = sd_read_sectors(lba, 1))) {
++		same = memcmp(b, pattern, SECTOR) == 0;
++	}
++	printf("SWEET SDHC: write test at sector 0x%llx: write+read %d, pattern %s\n",
++	    lba, error, same ? "matches" : "DIFFERS");
++	if (error) {
++		return;
++	}
++	memcpy(b, saved, SECTOR);
++	error = sd_write_sectors(lba, 1);
++	if (!error) {
++		error = sd_flush();
++	}
++	same = false;
++	if (!error && !(error = sd_read_sectors(lba, 1))) {
++		same = memcmp(b, saved, SECTOR) == 0;
++	}
++	printf("SWEET SDHC: write test: old contents restored %d, %s\n",
++	    error, same ? "verified" : "NOT verified");
++}
++
+ void
+ sweet_sdhc_probe(void)
+ {
+@@ -928,6 +1086,11 @@
+ 		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+ 		printf("SWEET SDHC: probe: 4 MiB read: %d in %llu ms = %llu KiB/s\n", error,
+ 		    ns / NSEC_PER_MSEC, ns ? (4096ull * NSEC_PER_SEC) / ns : 0);
++	}
++	uint32_t wtest = 0;
++	PE_parse_boot_argn("sdhcwtest", &wtest, sizeof(wtest));
++	if (!error && wtest) {
++		sd_write_test();
+ 	}
+ 	lck_mtx_unlock(&sweet_sdhc_lock);
+ }
