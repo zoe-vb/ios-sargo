@@ -33,6 +33,9 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   `sdhcrw=1`, bounds-checked in `sd_write_sectors()`, `sdhcwtest=1` one-sector test at userdata+16 GiB+1 MiB
   (CI run 39684420050 started; never booted with sdhcrw). `tools/mkiosroot-mac.sh` (`87573d2`): hdiutil steps
   tested on small images; full run needs the iPhone10,3 16.7.x IPSW + MacPorts rsync 3, as root.
+- **sargo iOS root image built (2026-10-21 23:35, NOT flashed):** `research/ipsw-x/ios16-root-sargo.img` (16 GiB, SHA256
+  e4a0739e...c766a, fsck clean) from IPSW 16.7.16 20H392 via `tools/mkiosroot-mac.sh`. Next: owner backup + Google account
+  removal + explicit yes, then `fastboot -S 256M flash userdata` (stage 3).
 - **iOS root install plan: `docs/SARGO-INSTALL.md`** (2026-10-21). Nothing erased yet. Root goes into userdata
   (only partition >= 16 GiB); erase step needs the owner's explicit yes after backup + Google account removal (FRP).
 - **eMMC 8-bit HS52 (x11, patch 0084 `2449cc1`, `xnu-kernel-0084/`): 36796 KiB/s** sustained 4 MiB read (user

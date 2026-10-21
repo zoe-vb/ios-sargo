@@ -109,6 +109,10 @@ sudo tools/mkiosroot-mac.sh research/ipsw-x/img/087-86698-044.dmg \
     research/ipsw-x/ios16-root-sargo.img 16g
 ```
 
+**Built 2026-10-21 23:35** by the owner: `research/ipsw-x/ios16-root-sargo.img`, 17179869184 bytes
+(16 GiB), HFSX signature at 0x400, `fsck_hfs` clean (script run), SHA256
+`e4a0739e5d444586e1b82a505e5189604ac619f70e6b0ae9c2c02ddabc0c766a`. Not flashed.
+
 What it does:
 
 1. `hdiutil attach` the IPSW's OS, SystemOS and AppOS images (APFS, read-only;
