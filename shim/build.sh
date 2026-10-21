@@ -5,6 +5,7 @@
 #     present, else with GNU binutils $BINUTILS (default aarch64-elf-, MacPorts aarch64-elf-binutils)
 #   mkbootimg: AOSP's if on PATH, else tools/mkbootimg.py
 #   HEADER=v1|v2 (sargo default v1: stock Pixel 3a boot.img, DTB appended to the kernel)
+#   KGZ=1: gzip the kernel before appending the DTB (v1 only)
 set -euo pipefail
 cd "$(dirname "$0")"
 BOARD=${BOARD:-sweet}
@@ -12,6 +13,8 @@ case $BOARD in
 sweet) BDEF=; DTB=${DTB:-../dtb/boot_unpacked/dtb}; HEADER=${HEADER:-v2}
 	DRV=ufs.c; OS_VERSION=17.0.0; PATCH_LEVEL=2035-06 ;;
 sargo) BDEF=-DBOARD_SARGO; DTB=${DTB:-../dtb/sargo/dtb}; HEADER=${HEADER:-v1}
+	# ABL b4s4-0.1-5653622 hangs on "fastboot boot" of an uncompressed Image-dtb
+	KGZ=${KGZ-1}
 	DRV=emmc.c; OS_VERSION=${OS_VERSION:-12.0.0}; PATCH_LEVEL=${PATCH_LEVEL:-2022-07} ;;
 *) echo "unknown BOARD=$BOARD" >&2; exit 1 ;;
 esac
@@ -66,8 +69,14 @@ if [ "$HEADER" = v2 ]; then
 		--os_version $OS_VERSION --os_patch_level $PATCH_LEVEL \
 		--cmdline "console=null" -o $OUT/shim-boot.img
 else
-	# Header v1, Image-dtb: ABL finds the DTB(s) right after the kernel's file size.
-	cat $OUT/Image "$DTB" > $OUT/Image-dtb
+	# Header v1, Image-dtb: ABL finds the DTB(s) right after the kernel.
+	# KGZ=1: Image.gz-dtb (the layout postmarketOS boots on sargo).
+	if [ -n "${KGZ:-}" ]; then
+		gzip -9 -n -c $OUT/Image > $OUT/Image.gz
+		cat $OUT/Image.gz "$DTB" > $OUT/Image-dtb
+	else
+		cat $OUT/Image "$DTB" > $OUT/Image-dtb
+	fi
 	$MKBOOTIMG --header_version 1 --kernel $OUT/Image-dtb --ramdisk $OUT/ramdisk.bin \
 		--base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
 		--tags_offset 0x100 --pagesize 4096 \
