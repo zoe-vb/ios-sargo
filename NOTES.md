@@ -29,6 +29,10 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   xnu-kernel/kernel.development.sweet shim/out/sargo/sargo-x01.adt shim/out/sargo/payload-x01.bin --cmdline
   "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0" && PATH=/opt/local/bin:$PATH BOARD=sargo
   LLVM=1 shim/build.sh ../shim/out/sargo/payload-x01.bin`. Details: docs/SARGO.md "First XNU boot".
+- **MILESTONE 2026-10-21 night: USERSPACE PID 1 RUNS ON SARGO (x09)**: x08 + `shim/out/sargo/sweet-init` (built on
+  macOS: `clang -target arm64-apple-ios16.0 -c tools/sweet-init.S` + `tools/mkinit.py`) as mockfs md0 ->
+  `*** SWEET userspace: init running as PID 1 ***` + 5 s heartbeat. Image `shim/out/sargo/shim-boot-x09.img`.
+  Next: XNU eMMC driver (port shim/emmc.c: RESET_ALL + vendor POR, power IRQ ack, re-init, ADMA2 only).
 - **MILESTONE 2026-10-21 night: XNU boots completely on sargo (x08)** to `IOFindBSDRoot: ... md0 has not been
   configured` (expected, no RAM disk). The x03..x07 hang was the sargo ADT: CPU `compatible` lacked
   `qcom,kryo470`, so SweetCPU never matched and BSD init slept forever in `ml_wait_max_cpus` (fixed `fcde37c`).

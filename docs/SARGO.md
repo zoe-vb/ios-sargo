@@ -122,6 +122,11 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   mockfs serves it as /sbin/launchd. Booting OKAY.
   Expect: `BSD root: md0`, `load_init_program: attempting to load /sbin/launchd`,
   `*** SWEET userspace: init running as PID 1 ***`, `SWEET init: still alive` every 5 s.
+  **Result (photo IMG_0042, off git): PID 1 RUNS.** socketinit, domaininit, skywalk_init (all 22
+  Skywalk self-tests PASSED), bsd_autoconf/kminit, lo0/gif0/stf0 attached, inittodr, setconf,
+  `Added memory device md0/rmd0`, `BSD root: md0, major 1, minor 0`, vfs_mountroot, devfs,
+  bsd_utaskbootstrap, `bsd_init: done`, `load_init_program: attempting to load /sbin/launchd`,
+  `*** SWEET userspace: init running as PID 1 ***`, `SWEET init: still alive` repeating.
 - Then the XNU eMMC driver (port of shim/emmc.c).
 
 ## Stage plan
