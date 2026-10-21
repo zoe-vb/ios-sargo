@@ -131,7 +131,16 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   64-bit ADMA2, 32 KiB per command, CMD18 + Auto-CMD12, GPT partition -> `sdhcroot0`, `rd=sdhcroot0`,
   `sdhcprobe=1`). CI run 39680874352 success, artifact `xnu-kernel-0083/`.
   x10 = 0083 kernel + `sargo-x08.adt` + md0 init, cmdline `... rd=md0 sdhcprobe=1`: Booting OKAY.
-  Expect `SWEET SDHC:` host/card/partition/probe lines before `BSD root: md0`, then PID 1.
+  **Result (photo IMG_0043, off git): the XNU eMMC driver works.**
+  `host v2 caps 0x742dc?b2, base 384000 kHz, power IRQs 0x0/0x0/0x2`;
+  `card OCR 0xc0ff8080, EXT_CSD rev 8, 122142720 sectors (59640 MiB), partition config 0x38`;
+  `"userdata": first sector 0x108e400, 51163 MiB, read-only, DMA at 0x102d68000` (64-bit ADMA2 OK);
+  `probe: partition start reads OK: ext4 (ext4 0xef53 ...)`; `32 KiB read at mid-partition: 0 in 11288 us`
+  (~2.9 MB/s, 1-bit legacy speed). Then `BSD root: md0` and PID 1 as in x09. Nothing was written.
+- Next for storage: faster bus (CMD6 to 8-bit + HS52/DDR52, volatile EXT_CSD settings; HS200/HS400
+  need tuning), larger transfers (several ADMA descriptors once the 12/16-byte descriptor size is
+  confirmed), then a write path (needed for the iOS root) and installing the HFS+ root into userdata
+  (erases Android data: ask the user first).
 
 ## Stage plan
 
