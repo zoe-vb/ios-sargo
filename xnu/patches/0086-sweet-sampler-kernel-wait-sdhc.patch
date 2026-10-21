@@ -19,15 +19,7 @@
  
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -79,6 +79,7 @@
- #include <kern/ipc_tt.h>
- #include <kern/task.h>
- #include <kern/thread.h>
-+#include <kern/thread_kernel_state.h>   /* SWEET sampler: saved kernel context */
- #include <kern/processor.h>
- #include <kern/sched.h>
- #include <kern/sched_prim.h>
-@@ -993,6 +994,10 @@
+@@ -993,6 +993,10 @@
  /*
   * SWEET process sampler (bsd/dev/sweet_sample.c): user pc/lr/sp and a frame
   * pointer backtrace of every thread of a task, from the saved user state.
@@ -38,7 +30,7 @@
   */
  void sweet_sample_task(const char *name, int pid, task_t task);
  
-@@ -1034,6 +1039,29 @@
+@@ -1034,6 +1038,29 @@
  				break;
  			}
  			fp = frame[0];
