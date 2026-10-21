@@ -185,7 +185,10 @@ is never #defined, so a second include redefines the struct), CI 39691807246 suc
 **x15 result (owner report, 2026-10-22 ~00:25): launchd got past the boot tasks, executed many
 processes, and the Apple logo appeared** (backboardd presenting through AppleCLCD). Slow, as
 expected on cpus=1 without GPU. The earlier stops (dirs_cleaner, launchd_cache_loader) did not
-recur: intermittent, cause unknown.
+recur: intermittent, cause unknown. Later: bluetoothd / fairplayd.H2 / xpcproxy relaunch in a loop (no hardware, same
+as sweet) and the kernel console overwrote the logo (AppleCLCD copies frames only on swaps).
+x16 = x15 + `sweetfb_noconsole=1 sweetfb_hz=30 sweetsample=-` (console muted from iOS's first
+frame; panics still draw) to see whether the GUI comes up.
 
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
