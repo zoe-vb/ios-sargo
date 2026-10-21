@@ -48,6 +48,7 @@
 #define HC_MCLK_SEL_MASK	(3U << 8)
 #define HC_SELECT_IN_EN		(1U << 18)
 #define HC_SELECT_IN_MASK	(7U << 19)
+#define VENDOR_SPEC_POR		0xa9c	/* sdhci_msm_probe writes this first */
 #define PWRCTL_BUS_OFF		(1U << 0)
 #define PWRCTL_BUS_ON		(1U << 1)
 #define PWRCTL_IO_LOW		(1U << 2)
@@ -195,7 +196,6 @@ static int set_clock(unsigned n)
 	return 0;
 }
 
-/* Bus power on raises the msm power IRQ; ack it like sdhci_msm_handle_pwr_irq. */
 /*
  * ABL leaves the msm wrapper in its HS400 setup. Put it back in the default
  * mode like msm_hc_select_default(), and hold the DLL in reset/power-down
@@ -211,12 +211,11 @@ static void msm_legacy_mode(void)
 	con_hex2("MSM now", "vspec=", rd32(H + MSM_VENDOR_SPEC), "dll=", rd32(H + MSM_DLL_CONFIG));
 }
 
-static uint32_t power_on(void)
+/* Ack msm power IRQs like sdhci_msm_handle_pwr_irq for up to ms; stop early on stop_on. */
+static uint32_t pwr_service(unsigned ms, uint32_t stop_on)
 {
-	uint32_t hc = rd32(H + SDHCI_HOST_CONTROL) & ~0xff00U;
-	wr32(H + SDHCI_HOST_CONTROL, hc | (0x0d << 8));	/* 3.0 V | bus power on, 1-bit */
 	uint32_t seen = 0;
-	uint64_t end = ticks() + 50 * TICKS_PER_MS;
+	uint64_t end = ticks() + (uint64_t)ms * TICKS_PER_MS;
 	while (ticks() < end) {
 		uint32_t st = rd32(H + MSM_PWRCTL_STATUS);
 		if (!st)
@@ -229,13 +228,37 @@ static uint32_t power_on(void)
 		if (st & (PWRCTL_IO_HIGH | PWRCTL_IO_LOW))
 			ack |= PWRCTL_IO_SUCCESS;
 		wr32(H + MSM_PWRCTL_CTL, ack);
-		if (st & PWRCTL_BUS_ON)
+		if (st & stop_on)
 			break;
 	}
 	return seen;
 }
 
-static int cmd(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
+/* Bus power on raises the msm power IRQ (BUS_ON). */
+static uint32_t power_on(void)
+{
+	uint32_t hc = rd32(H + SDHCI_HOST_CONTROL) & ~0xff00U;
+	wr32(H + SDHCI_HOST_CONTROL, hc | (0x0d << 8));	/* 3.0 V | bus power on, 1-bit */
+	return pwr_service(50, PWRCTL_BUS_ON);
+}
+
+/* Start from the state Linux probe + sdhci_init leave: vendor spec POR, RESET_ALL. */
+static int msm_reset(void)
+{
+	uint32_t stale = pwr_service(5, 0);	/* probe: handle a pending BUS_ON/IO_HIGH first */
+	wr32(H + MSM_VENDOR_SPEC, VENDOR_SPEC_POR);
+	uint32_t c = rd32(H + SDHCI_CLOCK_CONTROL) & 0x00ffffff;
+	wr32(H + SDHCI_CLOCK_CONTROL, c | 1U << 24);	/* SOFTWARE_RESET_ALL */
+	uint64_t end = ticks() + 100 * TICKS_PER_MS;
+	while (rd32(H + SDHCI_CLOCK_CONTROL) & (1U << 24))
+		if (ticks() > end)
+			return -1;
+	uint32_t after = pwr_service(20, 0);	/* reset can raise BUS_OFF */
+	con_hex2("RESET", "pwr pre=", stale, "post=", after);
+	return 0;
+}
+
+static int cmd_once(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
 {
 	uint64_t start = ticks(), end = start + 3000 * TICKS_PER_MS;
 	uint32_t inhibit = PS_CMD_INHIBIT | ((flags & CMD_DATA) || (flags & 3) == RSP_48_BUSY ? PS_DAT_INHIBIT : 0);
@@ -265,6 +288,13 @@ static int cmd(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
 			last_ticks = ticks() - start;
 			break;
 		}
+		/* R1b: one run saw busy-end (transfer complete) but never command complete */
+		if ((flags & 3) == RSP_48_BUSY && (st & INT_XFER_DONE) && ticks() - start > 10 * TICKS_PER_MS) {
+			wr32(H + SDHCI_INT_STATUS, INT_XFER_DONE);
+			last_int = st | 0x40000000;	/* marker: accepted without cmd done */
+			last_ticks = ticks() - start;
+			return 0;
+		}
 		if (ticks() > end) {
 			last_int = st | 0x80000000;	/* timeout marker */
 			return -1;
@@ -277,6 +307,19 @@ static int cmd(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
 		wr32(H + SDHCI_INT_STATUS, INT_XFER_DONE);
 	}
 	return 0;
+}
+
+static int retries;
+
+static int cmd(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
+{
+	for (int i = 0; i < 3; i++) {
+		if (!cmd_once(idx, arg, flags, xfer))
+			return 0;
+		retries++;
+		con_hex2(" retry", "cmd=", idx, "int=", last_int);
+	}
+	return -1;
 }
 
 /* One 512-byte block into blk[] via the PIO buffer port (CMD8 or CMD17). */
@@ -347,6 +390,8 @@ static int emmc_read_test(void)
 	if (rc)
 		return fail("GCC", rc);
 	con_hex2("DIV", "ident=", div_for(400), "xfer=", div_for(25000));
+	if ((rc = msm_reset()))
+		return fail("RESET", rc);
 	msm_legacy_mode();
 	con_hex2("PWRCTL", "irq=", power_on(), "hctl=", rd32(H + SDHCI_HOST_CONTROL));
 	wr32(H + SDHCI_INT_ENABLE, 0xfffffeff);	/* status bits on, card IRQ off */
