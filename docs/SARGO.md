@@ -103,6 +103,13 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=md0`: Booting OKAY.
   Watch for: heartbeat square top right (timer IRQs), `bsd_init: calling ...` steps,
   `SWEET BOOT: IORTC wait ... start/done`.
+- x07 result: heartbeat square changes rapidly (timer IRQs arrive and are handled), console
+  otherwise as x03. **Cause found (by reading the tree):** the SweetCPU personality is
+  `IONameMatch = 'qcom,kryo470'` (KernelConfigTables.cpp); the sargo ADT said `qcom,kryo360`, so
+  SweetCPU never matched, `SweetCPU::startAll` never ran, nothing called `ml_set_max_cpus`, and the
+  first `ml_wait_max_cpus()` (mcache/mbuf/sysctl/pthread setup in BSD init) sleeps with no timeout.
+  Fix: sargo CPU `compatible` = `qcom,kryo470`, `qcom,kryo360`, `ARM,v8` (sweet ADT unchanged).
+- x08 = x07 kernel + fixed ADT (`sargo-x08.adt`): Booting OKAY.
 
 ## Stage plan
 

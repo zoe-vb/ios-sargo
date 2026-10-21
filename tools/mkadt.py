@@ -46,12 +46,14 @@ QEMU_VTIMER_INTID = 27
 BOARDS = {
     'sweet': dict(
         compatible=['xiaomi,sweet', 'qcom,sm7150'], fb_h=2400, fb_size=0x1700000,
-        cpu_compatible='qcom,kryo470', cpu_hz=(1804800000, 2304000000),
+        cpu_compatible=['qcom,kryo470'], cpu_hz=(1804800000, 2304000000),
         storage=('sweet-ufs', 'qcom,ufshc', UFS, UFS_SIZE)),
     'sargo': dict(
         # 'xiaomi,sweet' stays first: SweetPlatformExpert matches it
         compatible=['xiaomi,sweet', 'google,sargo', 'qcom,sdm670'], fb_h=2220, fb_size=0x2400000,
-        cpu_compatible='qcom,kryo360', cpu_hz=(1708800000, 2016000000),
+        # 'qcom,kryo470' first: the SweetCPU personality matches it (IONameMatch); without
+        # SweetCPU nothing calls ml_set_max_cpus and ml_wait_max_cpus sleeps forever (x03..x07)
+        cpu_compatible=['qcom,kryo470', 'qcom,kryo360'], cpu_hz=(1708800000, 2016000000),
         # live /memory bank 1; every fixed carve-out is in the low bank
         highmem=(0x100000000, 0x7e2c0000),
         # sdhc_1 hc_mem + cqhci; no XNU driver yet
@@ -160,7 +162,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet'):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr(b['cpu_compatible']) + cstr('ARM,v8')),
+            ('compatible', b''.join(cstr(c) for c in b['cpu_compatible']) + cstr('ARM,v8')),
             ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
