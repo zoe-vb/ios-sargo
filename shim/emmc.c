@@ -33,6 +33,8 @@
 #define SDHCI_HOST_CONTROL2	0x3c
 #define SDHCI_CAPABILITIES	0x40
 #define SDHCI_CAPABILITIES_1	0x44
+#define SDHCI_ADMA_ERROR	0x54
+#define SDHCI_ADMA_ADDRESS	0x58
 #define SDHCI_HOST_VERSION	0xfc
 
 /* sdhci-msm v5 ("mci removed") vendor registers, in hc space (sdhci_msm_v5_offset) */
@@ -63,7 +65,6 @@
 
 #define PS_CMD_INHIBIT		(1U << 0)
 #define PS_DAT_INHIBIT		(1U << 1)
-#define PS_BUF_READ_EN		(1U << 11)	/* data available in the buffer */
 
 /* command register (upper half of 0x0c) */
 #define RSP_NONE		0x00
@@ -78,6 +79,14 @@
 #define R2			(RSP_136 | CMD_CRC)
 #define R3			RSP_48
 #define XFER_READ		(1U << 4)
+#define XFER_DMA		(1U << 0)
+#define HCTL_ADMA2_32		(2U << 3)	/* host control DMA select */
+#define INT_ADMA_ERROR		(1U << 25)
+
+/* ADMA2 32-bit descriptor: attr (valid|end|act=tran), length, address */
+#define ADMA_VALID		0x01
+#define ADMA_END		0x02
+#define ADMA_TRAN		0x20
 
 /* GCC (sdm845/sdm670 gcc driver): SDCC1 apps RCG and branch */
 #define GCC_BASE		0x00100000UL
@@ -116,9 +125,8 @@ static void mdelay(unsigned ms)
 static uint32_t last_int;
 static uint64_t last_ticks;	/* duration of the last cmd() */
 static uint32_t base_khz;	/* SDCC1 apps clock = SDHCI base clock */
-static uint32_t blk[128];	/* one 512-byte block */
-static int xfer_warned;
-static uint32_t pio_waits;	/* words that were not yet in the buffer */
+static uint32_t blk[128] __attribute__((aligned(64)));	/* one 512-byte block (DMA target) */
+static uint32_t adma_desc[2] __attribute__((aligned(8)));
 
 /* SDHCI 3.0 divided clock: f = base / (2N), N = 1..1023 (0 = undivided) */
 static unsigned div_for(uint32_t khz)
@@ -324,48 +332,43 @@ static int cmd(unsigned idx, uint32_t arg, unsigned flags, unsigned xfer)
 	return -1;
 }
 
-/* One 512-byte block into blk[] via the PIO buffer port (CMD8 or CMD17). */
+/*
+ * One 512-byte block into blk[] (CMD8 or CMD17) by ADMA2.
+ * Boots 5/6: on this msm wrapper PIO reads of the buffer port return word 0
+ * over and over (the FIFO never advances, transfer-complete never comes).
+ * Linux and ABL use ADMA, so do the same. MMU and caches are off: no
+ * cache maintenance; the SMMU is assumed in bypass (as for UFS on sweet).
+ */
 static int read_block(unsigned idx, uint32_t arg)
 {
+	uintptr_t buf = (uintptr_t)blk;
+	if (buf >> 32)
+		return -6;	/* 32-bit ADMA2 only */
+	for (int i = 0; i < 128; i++)
+		blk[i] = 0xdeadbeef;	/* so a DMA that never lands is visible */
+	adma_desc[0] = 512U << 16 | ADMA_TRAN | ADMA_END | ADMA_VALID;
+	adma_desc[1] = (uint32_t)buf;
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr32(H + SDHCI_ADMA_ADDRESS, (uint32_t)(uintptr_t)adma_desc);
+	wr32(H + SDHCI_ADMA_ADDRESS + 4, 0);
+	wr32(H + SDHCI_HOST_CONTROL, (rd32(H + SDHCI_HOST_CONTROL) & ~(3U << 3)) | HCTL_ADMA2_32);
 	wr32(H + SDHCI_BLOCK_SIZE, 1U << 16 | 512);
-	if (cmd(idx, arg, R1 | CMD_DATA, XFER_READ))
+	if (cmd(idx, arg, R1 | CMD_DATA, XFER_READ | XFER_DMA))
 		return -1;
 	uint64_t end = ticks() + 500 * TICKS_PER_MS;
-	while (!(rd32(H + SDHCI_INT_STATUS) & (INT_READ_READY | INT_ERROR)))
-		if (ticks() > end)
-			return -2;
-	if (rd32(H + SDHCI_INT_STATUS) & INT_ERROR) {
-		last_int = rd32(H + SDHCI_INT_STATUS);
+	uint32_t st;
+	while (!((st = rd32(H + SDHCI_INT_STATUS)) & (INT_XFER_DONE | INT_ERROR)))
+		if (ticks() > end) {
+			last_int = st | 0x80000000;
+			return -4;
+		}
+	if (st & INT_ERROR) {
+		last_int = st;
+		con_hex2(" adma", "err=", rd32(H + SDHCI_ADMA_ERROR), "ps=", rd32(H + SDHCI_PRESENT_STATE));
 		return -3;
 	}
-	wr32(H + SDHCI_INT_STATUS, INT_READ_READY);
-	/*
-	 * Boot 5: msm raises read-ready as data starts arriving, not when the
-	 * block is complete; reading 128 words straight away got word 0 and then
-	 * an empty buffer. Wait for "buffer read enable" before every word.
-	 */
-	for (int i = 0; i < 128; i++) {
-		if (!(rd32(H + SDHCI_PRESENT_STATE) & PS_BUF_READ_EN)) {
-			pio_waits++;
-			while (!(rd32(H + SDHCI_PRESENT_STATE) & PS_BUF_READ_EN))
-				if (ticks() > end)
-					return -5;
-		}
-		blk[i] = rd32(H + SDHCI_BUFFER);
-	}
-	end = ticks() + 50 * TICKS_PER_MS;
-	while (!(rd32(H + SDHCI_INT_STATUS) & (INT_XFER_DONE | INT_ERROR)))
-		if (ticks() > end) {
-			/* data arrived but no transfer-complete: note it once, reset DAT, use the block */
-			if (!xfer_warned++)
-				con_hex2("XFER?", "ps=", rd32(H + SDHCI_PRESENT_STATE), "int=", rd32(H + SDHCI_INT_STATUS));
-			uint32_t c = rd32(H + SDHCI_CLOCK_CONTROL) & 0x00ffffff;
-			wr32(H + SDHCI_CLOCK_CONTROL, c | 6U << 24);
-			while (rd32(H + SDHCI_CLOCK_CONTROL) & (6U << 24))
-				;
-			return 0;
-		}
-	wr32(H + SDHCI_INT_STATUS, INT_XFER_DONE);
+	wr32(H + SDHCI_INT_STATUS, INT_XFER_DONE | INT_READ_READY);
+	__asm__ volatile("dsb sy" ::: "memory");
 	return 0;
 }
 
@@ -461,7 +464,7 @@ static int emmc_read_test(void)
 	rc = read_block(8, 0);
 	if (rc)
 		return fail("EXTCSD", rc);
-	con_hex2("PIO", "waits=", pio_waits, "w0=", blk[0]);
+	con_hex2("DMA", "buf=", (uint32_t)(uintptr_t)blk, "w0=", blk[0]);
 	uint32_t sec = le32(212);
 	con_hex2("EXTCSD", "rev=", b8(192), "sectors=", sec);
 	con_hex2(" cfg", "part=", b8(179), "cmdq=", b8(15));
