@@ -84,6 +84,11 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   probably the first timed wait of the boot, so it is the first time the boot CPU idles (WFI,
   `platform_cache_idle_enter`) and needs a timer IRQ to wake. GIC setup in `pe_fiq.c` matches the
   shim's working stage-1 test. x04 = x03 + `wfi=0` (spin idle) to split "idle/WFI" from "timer IRQ".
+- x04 (`wfi=0`): same hang after SWEET FB -> not the WFI/idle-cache path.
+  Ruled out by reading the tree: console mute (0067 needs `sweetfb_noconsole=1`), progress UI
+  (iOS builds only with `-progress`), RTC code (none), hard-coded sweet MMIO before this point.
+- x05 = x04 + `-noprogress io=0xd` (IOKit attach/start/register trace): does a driver `start()`
+  hang (last line names it) or does IOKit go quiet (boot thread stuck in a timed wait)?
 
 ## Stage plan
 
