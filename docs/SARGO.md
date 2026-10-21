@@ -116,8 +116,13 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   end: `panic: IOFindBSDRoot: specified root memory device, md0, has not been configured
   @IOKitBSDInit.cpp:826` (no RAM disk given). Panic path works (stackshot, backtrace, zone info).
   mach_absolute_time at panic 0x406bd269 (~56 s), calendar 0x38 s.
-- Next: RAM-disk root with `tools/sweet-init.S` (mockfs, rd=md0, as sweet 0025) -> PID 1 on sargo;
-  then the XNU eMMC driver (port of shim/emmc.c).
+- x09 = x08 + RAM disk: the PID 1 test init built on macOS (`clang -target arm64-apple-ios16.0 -c
+  tools/sweet-init.S` + `tools/mkinit.py` -> `shim/out/sargo/sweet-init`, 16635 bytes, codesign:
+  ad-hoc, CodeDirectory v20400) via `mkpayload.py --ramdisk` (RAM disk at PA 0x1024c8000, 32 KiB),
+  mockfs serves it as /sbin/launchd. Booting OKAY.
+  Expect: `BSD root: md0`, `load_init_program: attempting to load /sbin/launchd`,
+  `*** SWEET userspace: init running as PID 1 ***`, `SWEET init: still alive` every 5 s.
+- Then the XNU eMMC driver (port of shim/emmc.c).
 
 ## Stage plan
 
