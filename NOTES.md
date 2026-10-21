@@ -29,7 +29,12 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   xnu-kernel/kernel.development.sweet shim/out/sargo/sargo-x01.adt shim/out/sargo/payload-x01.bin --cmdline
   "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0" && PATH=/opt/local/bin:$PATH BOARD=sargo
   LLVM=1 shim/build.sh ../shim/out/sargo/payload-x01.bin`. Details: docs/SARGO.md "First XNU boot".
-- **sargo XNU hang (x03..x06):** stops on the boot thread after IOKit finishes (x05 `io=0xd` trace clean),
+- **MILESTONE 2026-10-21 night: XNU boots completely on sargo (x08)** to `IOFindBSDRoot: ... md0 has not been
+  configured` (expected, no RAM disk). The x03..x07 hang was the sargo ADT: CPU `compatible` lacked
+  `qcom,kryo470`, so SweetCPU never matched and BSD init slept forever in `ml_wait_max_cpus` (fixed `fcde37c`).
+  Image: `shim/out/sargo/shim-boot-x08.img` = CI 0082 kernel (`xnu-kernel-0082/`) + `sargo-x08.adt`.
+  Next: RAM-disk PID 1 (tools/sweet-init.S + mockfs), then the XNU eMMC driver.
+- **sargo XNU hang (x03..x06), solved by the line above:** stops on the boot thread after IOKit finishes (x05 `io=0xd` trace clean),
   presumably in the silent 30 s IORTC wait in IOKitInitializeTime; `wfi=0` (x04) does not help. x06 = binary
   patch removing that wait (result pending at handoff). **Patch 0082** (`01e9a01`): timer-IRQ heartbeat square
   (top right) + bsd_init progress + timer registers around the wait. Fork for CI builds: `zoe-vb/ios-sargo`

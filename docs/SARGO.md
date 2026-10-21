@@ -109,7 +109,15 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   SweetCPU never matched, `SweetCPU::startAll` never ran, nothing called `ml_set_max_cpus`, and the
   first `ml_wait_max_cpus()` (mcache/mbuf/sysctl/pthread setup in BSD init) sleeps with no timeout.
   Fix: sargo CPU `compatible` = `qcom,kryo470`, `qcom,kryo360`, `ARM,v8` (sweet ADT unchanged).
-- x08 = x07 kernel + fixed ADT (`sargo-x08.adt`): Booting OKAY.
+- x08 = x07 kernel + fixed ADT (`sargo-x08.adt`): Booting OKAY. **XNU boots completely** (photos IMG_0040/0041, off git):
+  `SWEET CPU: requested=1 selected=1`, `cpu=0 mpidr=0x0 came alive; SGI1 OK`, `1/1 CPUs initialized`,
+  BSD banner, bsd_init steps (kauth, MAC framework, kmem_suballoc, bsd_bufferinit: 2535 buffer
+  headers), `IOKitInitializeTime` (`IORTC wait (30 s) start: irqs 1 ctl 0x1 ...`), then the expected
+  end: `panic: IOFindBSDRoot: specified root memory device, md0, has not been configured
+  @IOKitBSDInit.cpp:826` (no RAM disk given). Panic path works (stackshot, backtrace, zone info).
+  mach_absolute_time at panic 0x406bd269 (~56 s), calendar 0x38 s.
+- Next: RAM-disk root with `tools/sweet-init.S` (mockfs, rd=md0, as sweet 0025) -> PID 1 on sargo;
+  then the XNU eMMC driver (port of shim/emmc.c).
 
 ## Stage plan
 
