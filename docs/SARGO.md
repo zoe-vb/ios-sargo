@@ -127,7 +127,11 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   `Added memory device md0/rmd0`, `BSD root: md0, major 1, minor 0`, vfs_mountroot, devfs,
   bsd_utaskbootstrap, `bsd_init: done`, `load_init_program: attempting to load /sbin/launchd`,
   `*** SWEET userspace: init running as PID 1 ***`, `SWEET init: still alive` repeating.
-- Then the XNU eMMC driver (port of shim/emmc.c).
+- Patch 0083 (`b8214e9`): read-only XNU eMMC driver `bsd/dev/sweet_sdhc.c` (shim bring-up sequence,
+  64-bit ADMA2, 32 KiB per command, CMD18 + Auto-CMD12, GPT partition -> `sdhcroot0`, `rd=sdhcroot0`,
+  `sdhcprobe=1`). CI run 39680874352 success, artifact `xnu-kernel-0083/`.
+  x10 = 0083 kernel + `sargo-x08.adt` + md0 init, cmdline `... rd=md0 sdhcprobe=1`: Booting OKAY.
+  Expect `SWEET SDHC:` host/card/partition/probe lines before `BSD root: md0`, then PID 1.
 
 ## Stage plan
 
