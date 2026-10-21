@@ -8,3 +8,7 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+# CI downloads (kernel artifact, patched xnu tree + objects)
+xnu-kernel/
+xnu-src/
+.DS_Store
