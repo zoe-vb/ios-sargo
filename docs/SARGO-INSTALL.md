@@ -178,6 +178,11 @@ tasks keybag, usermanagerd, dirs_cleaner, xpcroleaccountd, init_featureflags, au
 exec. So the first boot's dirs_cleaner stop was first-boot work or a one-off; the stop is now in
 launchd_cache_loader (x14 has launchd_unsecure_cache=1).
 
+0086 fixed (`653224f`: the first build failed because kern/thread_kernel_state.h has a guard that
+is never #defined, so a second include redefines the struct), CI 39691807246 success,
+`xnu-kernel-0086/`. **x15** = 0086 kernel + x14 cmdline without sdhcwtest, plus
+`sweetsample=launchd_cache_loader,dirs_cleaner,launchd`: Booting OKAY.
+
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
 - **4a** `rd=sdhcroot0` without `sdhcrw`: expect `hfs: mounted ... on device` and then
