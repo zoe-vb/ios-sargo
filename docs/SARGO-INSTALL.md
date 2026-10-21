@@ -195,6 +195,12 @@ live, iOS never drew a frame). Stops so far: x14 dirs_cleaner, x14 launchd_cache
 alive: heartbeat). Suspects: a lock/I/O wait that never completes (new eMMC driver, HFS journal)
 or a high-priority kernel thread spinning. x17 = x15 config with
 `sweetsample=cc_fips_test,keybagd,usermanagerd,dirs_cleaner,launchd_cache_loader,launchd`.
+**x17 result:** went through to the Apple logo again. Pattern so far: sampler thread running
+(x15, x17) -> logo; not running (x14 twice with 0085, x16 with `sweetsample=-`) -> stall.
+Hypothesis (unproven, n=5): a lost wakeup / missed timer deadline that any periodic kernel wakeup
+hides. On sweet the console-log, touch, keys and USB threads (all started by sweet_ufs_init, none
+on sargo) would have hidden it. Confirming test later: a thread that only wakes every second.
+x18 = x17 + `sweetfb_noconsole=1 sweetfb_hz=30` (sampler kept on) to see the GUI.
 
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
