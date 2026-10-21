@@ -7,12 +7,13 @@
  * Any unexpected exception paints a blue panic screen.
  */
 #include <stdint.h>
+#include "board.h"
 #include "console.h"
+#include "fdt.h"
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
 
-#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
 #define RESTART_BOOTLOADER	0x77665500U
 #define PSHOLD			0x0c264000UL
 
@@ -59,6 +60,7 @@ static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 extern char secondary_entry[];
 
 static const char *stage;	/* set at runtime: no absolute pointers in data */
+static uintptr_t imem_restart;	/* restart reason word, 0 = unknown */
 static volatile uint64_t sec_mpidr[NR_CPUS];
 static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
 static volatile uint32_t irq_count, irq_other, irq_last;
@@ -106,7 +108,8 @@ static void __attribute__((noreturn)) reset(unsigned after_s)
 	con_skip();
 	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
 	delay_ms(after_s * 1000);
-	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
+	if (imem_restart)
+		wr32(imem_restart, RESTART_BOOTLOADER);
 	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
 	wr32(PSHOLD, 0);
@@ -340,6 +343,89 @@ static void test_gic(void)
 	isb();
 }
 
+/* ---- live FDT facts (what ABL hands us) ---- */
+
+/* reg cells: qcom device trees use #address-cells = #size-cells = 2 at the root, 1 under /soc */
+static uint64_t reg_cell(uintptr_t v, uint32_t len, int idx, int cells)
+{
+	(void)len;
+	uintptr_t a = v + (uintptr_t)idx * cells * 4;
+	return cells == 2 ? (uint64_t)fdt_be32(a) << 32 | fdt_be32(a + 4) : fdt_be32(a);
+}
+
+/* qcom,msm-imem { reg = <base size>; restart_reason@65c { reg = <0x65c 4>; } } */
+static uintptr_t find_imem_restart(uintptr_t dtb)
+{
+	uint32_t len, rlen;
+	uintptr_t base = fdt_prop(dtb, 0, "qcom,msm-imem", "reg", &len);
+	uintptr_t rr = fdt_prop(dtb, 0, "qcom,msm-imem-restart_reason", "reg", &rlen);
+	if (!base || !rr || rlen < 4)
+		return IMEM_RESTART_FALLBACK;
+	uint64_t b = len >= 16 ? reg_cell(base, len, 0, 2) : reg_cell(base, len, 0, 1);
+	return b + fdt_be32(rr);
+}
+
+static void con_fdt_str(const char *label, uintptr_t v, uint32_t len)
+{
+	char buf[56];	/* 64 columns at scale 2, minus the label */
+	uint32_t i;
+	for (i = 0; v && i < len && i < sizeof(buf) - 1 && ((const char *)v)[i]; i++)
+		buf[i] = ((const char *)v)[i];
+	buf[i] = 0;
+	con_str(label, v ? buf : "(absent)");
+}
+
+/* Print the facts the ADT for a new board needs: model, memory map, cpus. */
+static void __attribute__((unused)) fdt_facts(uintptr_t dtb)
+{
+	uint32_t len;
+	uintptr_t v;
+
+	stage = "fdt";
+	con_hex2("DTB", "at=", dtb, "magic=", dtb ? fdt_be32(dtb) : 0);
+	con_fdt_str("MODEL", fdt_prop(dtb, "", 0, "model", &len), len);
+	v = fdt_prop(dtb, "", 0, "qcom,board-id", &len);
+	con_hex2("BOARDID", "a=", v ? fdt_be32(v) : 0, "b=", v && len >= 8 ? fdt_be32(v + 4) : 0);
+	/* ABL fills /memory from the DDR training data; 2+2 cells at the root */
+	v = fdt_prop(dtb, "memory", 0, "reg", &len);
+	for (int i = 0; v && i < (int)(len / 16) && i < 6; i++) {
+		char label[] = "MEM0";
+		label[3] = '0' + i;
+		con_hex(label, reg_cell(v, len, 2 * i, 2));
+		con_hex(" size", reg_cell(v, len, 2 * i + 1, 2));
+	}
+	if (!v)
+		con_str("MEM", "no /memory reg");
+	imem_restart = find_imem_restart(dtb);
+	con_hex("IMEMRR", imem_restart);
+	uint64_t mmfr0 = rsr("id_aa64mmfr0_el1");
+	con_hex2("CPU", "midr=", (uint32_t)rsr("midr_el1"), "mpidr=", (uint32_t)rsr("mpidr_el1"));
+	con_hex2("MMFR0", "pa=", mmfr0 & 0xf, "tg16=", (mmfr0 >> 20) & 0xf);	/* xnu needs tg16 != 0 */
+	con_hex2("CNTFRQ", "hz=", (uint32_t)rsr("cntfrq_el0"), "el=", (uint32_t)(rsr("CurrentEL") >> 2));
+}
+
+#ifndef BOARD_SWEET
+/* New board, no payload: collect everything the port needs on one screen. */
+static void __attribute__((noreturn)) board_bringup(uintptr_t dtb)
+{
+	con_skip();
+	fdt_facts(dtb);
+	con_skip();
+	stage = "psci";
+	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
+	test_smp();
+	con_skip();
+	test_gic();
+	con_skip();
+	stage = "emmc";
+	test_emmc();
+	con_skip();
+	con_str("DONE", "photo this screen; reset ~3 min");
+	delay_ms(180000);
+	reset(20);
+}
+#endif
+
 /* ---- main ---- */
 
 static void __attribute__((unused)) psci_line(const char *label, uint64_t fn)
@@ -377,10 +463,14 @@ void shim_main(uint64_t dtb)
 	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
 	stage = "loader";
 	con_clear(RED);
-	con_str("SHIM", "sweet milestone 4: xnu loader");
+	con_str("SHIM", BOARD_NAME " milestone 4: xnu loader");
+	imem_restart = find_imem_restart(dtb);
 	con_skip();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
+#ifndef BOARD_SWEET
+	board_bringup(dtb);
+#endif
 	con_skip();
 
 	/* No payload: probe the internal UFS while the MMU is still off. */

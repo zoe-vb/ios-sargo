@@ -24,6 +24,21 @@ for name, sz in parts:
         open(f'{out}/{name}', 'wb').write(b[off:off+sz])
     info[name + '_offset'] = off
     off += rnd(sz)
+# v0/v1 (e.g. Pixel 3a Image.lz4-dtb): the DTBs are appended to the kernel.
+# Each starts with the FDT magic and carries its own totalsize; dtb = all of them.
+if ver < 2 and ks:
+    k, pos, dtbs = b[ps:ps + ks], 0, []
+    while (pos := k.find(b'\xd0\x0d\xfe\xed', pos)) >= 0:
+        total, = struct.unpack_from('>I', k, pos + 4)
+        if 0x100 <= total <= len(k) - pos:
+            dtbs.append(k[pos:pos + total])
+            pos += total
+        else:
+            pos += 4
+    if dtbs:
+        open(f'{out}/dtb', 'wb').write(b''.join(dtbs))
+        info['appended_dtbs'] = len(dtbs)
+        info['appended_dtb_offset_in_kernel'] = k.find(dtbs[0])
 with open(f'{out}/header.txt', 'w') as f:
     for k, v in info.items():
         f.write(f'{k}: {v}\n')

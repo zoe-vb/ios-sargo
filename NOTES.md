@@ -1,5 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Second board: Pixel 3a (sargo, SDM670) - started 2026-10-21
+
+Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked Pixel 3a for testing.
+- Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
+  unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
+  old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
+  shim.c: model/board-id, /memory banks, IMEM, MIDR/MPIDR/TGran16, PSCI, SMP, GIC, read-only eMMC
+  dump from `emmc.c`), `build.sh` BOARD/LLVM/HEADER options (sargo output `shim/out/sargo/`),
+  `unpack_bootv2.py` extracts appended DTBs (v0/v1 boot images).
+- Verified on this Mac only: both boards compile with Apple clang `--target=aarch64-none-elf`
+  (no absolute relocations once `-fno-jump-tables` is set, now in the LLVM=1 path); fdt_prop
+  tested on a synthetic sargo-like FDT; the appended-DTB extraction was tested on a synthetic v1 image.
+- NOT done: link + mkbootimg (this Mac has no ld.lld/llvm-objcopy/mkbootimg/fastboot), boot on the phone.
+  Header v1 + appended DTB for sargo is a guess (Pixel 3a ships Image.lz4-dtb); check
+  `dtb/sargo/header.txt` from the stock boot.img.
+- Next: get the stock sargo boot.img -> `dtb/sargo/dtb`, build, `fastboot boot`, photograph the
+  stage-1 screen, then the sargo ADT memory map in `mkadt.py` (docs/SARGO.md stage 2).
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
