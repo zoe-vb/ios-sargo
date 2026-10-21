@@ -1,7 +1,9 @@
 #!/bin/bash
 # Build the shim and wrap it in a boot.img that mirrors the stock header.
 #   BOARD=sweet|sargo (default sweet)  DTB=path to the stock DTB
-#   LLVM=1: clang + ld.lld + llvm-* instead of the aarch64-linux-gnu- GNU tools
+#   LLVM=1: compile with clang (e.g. Apple clang on macOS); link with ld.lld + llvm-* if
+#     present, else with GNU binutils $BINUTILS (default aarch64-elf-, MacPorts aarch64-elf-binutils)
+#   mkbootimg: AOSP's if on PATH, else tools/mkbootimg.py
 #   HEADER=v1|v2 (sargo default v1: stock Pixel 3a boot.img, DTB appended to the kernel)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -15,12 +17,18 @@ sargo) BDEF=-DBOARD_SARGO; DTB=${DTB:-../dtb/sargo/dtb}; HEADER=${HEADER:-v1}
 esac
 if [ -n "${LLVM:-}" ]; then
 	# no switch lookup tables: they hold absolute pointers
-	CC="clang --target=aarch64-none-elf -fno-jump-tables"; LDFLAGS="-fuse-ld=lld"
-	OBJCOPY=llvm-objcopy; READELF=llvm-readelf; NM=llvm-nm
+	CC="clang --target=aarch64-none-elf -fno-jump-tables"
+	if command -v ld.lld >/dev/null; then
+		LD="ld.lld"; OBJCOPY=llvm-objcopy; READELF=llvm-readelf; NM=llvm-nm
+	else
+		B=${BINUTILS:-aarch64-elf-}
+		LD="${B}ld --no-warn-rwx-segments"; OBJCOPY=${B}objcopy; READELF=${B}readelf; NM=${B}nm
+	fi
 else
-	CC=aarch64-linux-gnu-gcc; LDFLAGS="-Wl,--no-warn-rwx-segments"
+	CC=aarch64-linux-gnu-gcc; LD=
 	OBJCOPY=aarch64-linux-gnu-objcopy; READELF=aarch64-linux-gnu-readelf; NM=aarch64-linux-gnu-nm
 fi
+command -v mkbootimg >/dev/null && MKBOOTIMG=mkbootimg || MKBOOTIMG="python3 ../tools/mkbootimg.py"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $BDEF"
 # sweet keeps the historical out/ (NOTES.md refers to it)
 [ $BOARD = sweet ] && OUT=out || OUT=out/$BOARD
@@ -34,7 +42,11 @@ done
 # header's image_size (start.o, linked at 0) may be an absolute address.
 abs=$($READELF -r "${OBJS[@]:1}" | grep -c ABS64 || true)
 [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
-$CC $CFLAGS -static -T shim.ld $LDFLAGS -Wl,--build-id=none -Wl,-N "${OBJS[@]}" -o $OUT/shim.elf
+if [ -n "$LD" ]; then
+	$LD -static -T shim.ld --build-id=none -N "${OBJS[@]}" -o $OUT/shim.elf
+else
+	$CC $CFLAGS -static -T shim.ld -Wl,--no-warn-rwx-segments -Wl,--build-id=none -Wl,-N "${OBJS[@]}" -o $OUT/shim.elf
+fi
 $OBJCOPY -O binary $OUT/shim.elf $OUT/Image
 # ABL copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.
 size=$(( 0x$($NM $OUT/shim.elf | awk '$3=="_end"{print $1}') ))
@@ -48,7 +60,7 @@ else
 fi
 [ -f "$DTB" ] || { echo "error: stock DTB $DTB missing (see NOTES.md / docs/SARGO.md)" >&2; exit 1; }
 if [ "$HEADER" = v2 ]; then
-	mkbootimg --header_version 2 --kernel $OUT/Image --ramdisk $OUT/ramdisk.bin \
+	$MKBOOTIMG --header_version 2 --kernel $OUT/Image --ramdisk $OUT/ramdisk.bin \
 		--dtb "$DTB" --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
 		--tags_offset 0x100 --dtb_offset 0x1f00000 --pagesize 4096 \
 		--os_version $OS_VERSION --os_patch_level $PATCH_LEVEL \
@@ -56,7 +68,7 @@ if [ "$HEADER" = v2 ]; then
 else
 	# Header v1, Image-dtb: ABL finds the DTB(s) right after the kernel's file size.
 	cat $OUT/Image "$DTB" > $OUT/Image-dtb
-	mkbootimg --header_version 1 --kernel $OUT/Image-dtb --ramdisk $OUT/ramdisk.bin \
+	$MKBOOTIMG --header_version 1 --kernel $OUT/Image-dtb --ramdisk $OUT/ramdisk.bin \
 		--base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
 		--tags_offset 0x100 --pagesize 4096 \
 		--os_version $OS_VERSION --os_patch_level $PATCH_LEVEL \
