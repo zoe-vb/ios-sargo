@@ -182,6 +182,10 @@ launchd_cache_loader (x14 has launchd_unsecure_cache=1).
 is never #defined, so a second include redefines the struct), CI 39691807246 success,
 `xnu-kernel-0086/`. **x15** = 0086 kernel + x14 cmdline without sdhcwtest, plus
 `sweetsample=launchd_cache_loader,dirs_cleaner,launchd`: Booting OKAY.
+**x15 result (owner report, 2026-10-22 ~00:25): launchd got past the boot tasks, executed many
+processes, and the Apple logo appeared** (backboardd presenting through AppleCLCD). Slow, as
+expected on cpus=1 without GPU. The earlier stops (dirs_cleaner, launchd_cache_loader) did not
+recur: intermittent, cause unknown.
 
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 

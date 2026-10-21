@@ -33,6 +33,9 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   `sdhcrw=1`, bounds-checked in `sd_write_sectors()`, `sdhcwtest=1` one-sector test at userdata+16 GiB+1 MiB
   (CI run 39684420050 started; never booted with sdhcrw). `tools/mkiosroot-mac.sh` (`87573d2`): hdiutil steps
   tested on small images; full run needs the iPhone10,3 16.7.x IPSW + MacPorts rsync 3, as root.
+- **MILESTONE 2026-10-22 ~00:25: Apple logo on sargo (x15).** Writable eMMC root (sdhcrw=1, root starts ro, iOS mount
+  remounts rw), launchd past boot tasks, daemons exec, backboardd shows the logo. Earlier x14 boots stopped
+  intermittently in dirs_cleaner / launchd_cache_loader (cause unknown; sampler 0086 ready for the next stall).
 - **MILESTONE 2026-10-21 ~23:50: iOS root runs from the eMMC on sargo (x13, read-only).** Owner flashed userdata with
   ios16-root-sargo.img. x13 (0085 kernel, sargo-x13.adt, rd=sdhcroot0, no write args): launchd runs iOS /sbin/mount,
   which exits 1 (no rootrw) -> panic `mount[3] exited`; panic shows `OS version: 20H392`. Next: stage 4b write test.
