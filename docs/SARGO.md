@@ -142,6 +142,8 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   **Result (user report): 4 MiB read at 36796 KiB/s** (x10, 1-bit legacy: ~2900 KiB/s), i.e. ~77% of
   the 8-bit 48 MHz bus (384 MHz / 8) with one 32 KiB ADMA command at a time and polled completion.
   Not separately confirmed: the exact `bus ...` line (no photo).
+- Patch 0085 (`168c3e0`, CI 39684420050, `xnu-kernel-0085/`): write path (off without `sdhcrw=1`).
+  x12 = 0085 kernel read-only (cmdline checked: `... rd=md0 sdhcprobe=1`, no sdhcrw/sdhcwtest): Booting OKAY.
 - Next for storage (before 0084): faster bus (CMD6 to 8-bit + HS52/DDR52, volatile EXT_CSD settings; HS200/HS400
   need tuning), larger transfers (several ADMA descriptors once the 12/16-byte descriptor size is
   confirmed), then a write path (needed for the iOS root) and installing the HFS+ root into userdata

@@ -95,6 +95,20 @@ and runs as root:
 sudo tools/mkiosroot-mac.sh OS.dmg SystemOS.dmg AppOS.dmg ios16-root-sargo.img 16g
 ```
 
+Inputs on this Mac (2026-10-21, gitignored `research/ipsw-x/`): IPSW
+`iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw`, D22AP identity: OS
+`087-86698-044.dmg` (ULFO), SystemOS `087-86593-047.dmg` (raw), AppOS
+`087-86715-047.dmg` (raw), all mount read-only on macOS (owners kept, OS reports
+16.7.16) - the same images as sweet's builds. `research/ipsw-x/d22ap.adt` =
+`DeviceTree.d22ap.im4p` unwrapped (IM4P payload, LZFSE via libcompression):
+186084 bytes, `/product` with 68 properties; `mkadt.py --board sargo` now includes it.
+
+```sh
+sudo tools/mkiosroot-mac.sh research/ipsw-x/img/087-86698-044.dmg \
+    research/ipsw-x/img/087-86593-047.dmg research/ipsw-x/img/087-86715-047.dmg \
+    research/ipsw-x/ios16-root-sargo.img 16g
+```
+
 What it does:
 
 1. `hdiutil attach` the IPSW's OS, SystemOS and AppOS images (APFS, read-only;
