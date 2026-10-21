@@ -78,7 +78,12 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   scheduler, IPC, PRNG, pthread, AMFI, vnguard, device-tree platform expert, AKS, WDT,
   IOSurface root, HID buttons/touch services, battery fallback, and
   `SWEET FB: AppleCLCD 1080x2220 stride 4320 at 0x9c000000, presented as 1125x2436`.
-  Photo shows the console up to that line; end state (root wait / panic) not yet observed.
+  Note: the console wraps to the top instead of scrolling; the newest line is the one above
+  the cleared rows, not the bottom line. **x03 hangs after the SWEET FB line** (3+ min, nothing new).
+  Next on the boot thread is `IOKitInitializeTime()`: a silent 30 s wait for `IORTC`, which is
+  probably the first timed wait of the boot, so it is the first time the boot CPU idles (WFI,
+  `platform_cache_idle_enter`) and needs a timer IRQ to wake. GIC setup in `pe_fiq.c` matches the
+  shim's working stage-1 test. x04 = x03 + `wfi=0` (spin idle) to split "idle/WFI" from "timer IRQ".
 
 ## Stage plan
 
