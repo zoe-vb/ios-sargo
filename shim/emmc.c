@@ -63,6 +63,7 @@
 
 #define PS_CMD_INHIBIT		(1U << 0)
 #define PS_DAT_INHIBIT		(1U << 1)
+#define PS_BUF_READ_EN		(1U << 11)	/* data available in the buffer */
 
 /* command register (upper half of 0x0c) */
 #define RSP_NONE		0x00
@@ -117,6 +118,7 @@ static uint64_t last_ticks;	/* duration of the last cmd() */
 static uint32_t base_khz;	/* SDCC1 apps clock = SDHCI base clock */
 static uint32_t blk[128];	/* one 512-byte block */
 static int xfer_warned;
+static uint32_t pio_waits;	/* words that were not yet in the buffer */
 
 /* SDHCI 3.0 divided clock: f = base / (2N), N = 1..1023 (0 = undivided) */
 static unsigned div_for(uint32_t khz)
@@ -337,8 +339,20 @@ static int read_block(unsigned idx, uint32_t arg)
 		return -3;
 	}
 	wr32(H + SDHCI_INT_STATUS, INT_READ_READY);
-	for (int i = 0; i < 128; i++)
+	/*
+	 * Boot 5: msm raises read-ready as data starts arriving, not when the
+	 * block is complete; reading 128 words straight away got word 0 and then
+	 * an empty buffer. Wait for "buffer read enable" before every word.
+	 */
+	for (int i = 0; i < 128; i++) {
+		if (!(rd32(H + SDHCI_PRESENT_STATE) & PS_BUF_READ_EN)) {
+			pio_waits++;
+			while (!(rd32(H + SDHCI_PRESENT_STATE) & PS_BUF_READ_EN))
+				if (ticks() > end)
+					return -5;
+		}
 		blk[i] = rd32(H + SDHCI_BUFFER);
+	}
 	end = ticks() + 50 * TICKS_PER_MS;
 	while (!(rd32(H + SDHCI_INT_STATUS) & (INT_XFER_DONE | INT_ERROR)))
 		if (ticks() > end) {
@@ -447,6 +461,7 @@ static int emmc_read_test(void)
 	rc = read_block(8, 0);
 	if (rc)
 		return fail("EXTCSD", rc);
+	con_hex2("PIO", "waits=", pio_waits, "w0=", blk[0]);
 	uint32_t sec = le32(212);
 	con_hex2("EXTCSD", "rev=", b8(192), "sectors=", sec);
 	con_hex2(" cfg", "part=", b8(179), "cmdq=", b8(15));
@@ -456,7 +471,7 @@ static int emmc_read_test(void)
 	if (rc)
 		return fail("LBA1", rc);
 	if (le32(0) != 0x20494645 || le32(4) != 0x54524150)	/* "EFI PART" */
-		return fail("GPT sig", (int)le32(0));
+		return fail("GPT sig", (int)le32(4));
 	uint32_t ent_lba = le32(72), nent = le32(80), esz = le32(84);
 	con_hex2("GPT", "ents=", nent, "at lba=", ent_lba);
 	if (esz != 128)
