@@ -168,7 +168,15 @@ minutes while the timer heartbeat keeps changing. Boot tasks run one at a time, 
 has not exited (its strings: removefile() on a worker thread + pthread_cond_timedwait; uses
 renamex_np RENAME_SWAP). The write test lines were not photographed.
 Patch 0086 (`51f0816`, CI 39690982704): sampler with kernel wait info, started by the eMMC driver;
-next boot x15 = x14 + `sweetsample=dirs_cleaner,launchd`.
+next boot x15 = x14 + `sweetsample=launchd_cache_loader,dirs_cleaner,launchd`.
+
+**x14 again (second boot of the same image, photo IMG_0048):** dirs_cleaner now finished; boot
+tasks keybag, usermanagerd, dirs_cleaner, xpcroleaccountd, init_featureflags, auearlyboot
+(`No Early Boot Accessories`), tzinit (`Bad zoneinfo link`, reset; clock then shows 1969-12-31
+16:01 = Pacific), FinishRestoreFromBackup, finish_demo_restore, sysstatuscheck, prng_seedctl
+(`failed to load kernel prng seed`, as on sweet), then `exec launchd_cache_loader` and no further
+exec. So the first boot's dirs_cleaner stop was first-boot work or a one-off; the stop is now in
+launchd_cache_loader (x14 has launchd_unsecure_cache=1).
 
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
