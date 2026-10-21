@@ -35,11 +35,19 @@
 #define SDHCI_CAPABILITIES_1	0x44
 #define SDHCI_HOST_VERSION	0xfc
 
-/* sdhci-msm v5 ("mci removed") vendor registers, in hc space */
-#define MSM_PWRCTL_STATUS	0xdc
-#define MSM_PWRCTL_MASK		0xe0
-#define MSM_PWRCTL_CLEAR	0xe4
-#define MSM_PWRCTL_CTL		0xe8
+/* sdhci-msm v5 ("mci removed") vendor registers, in hc space (sdhci_msm_v5_offset) */
+#define MSM_DLL_CONFIG		0x200
+#define MSM_VENDOR_SPEC		0x20c
+#define MSM_PWRCTL_STATUS	0x240
+#define MSM_PWRCTL_MASK		0x244
+#define MSM_PWRCTL_CLEAR	0x248
+#define MSM_PWRCTL_CTL		0x24c
+#define DLL_PDN			(1U << 29)
+#define DLL_RST			(1U << 30)
+#define HC_MCLK_SEL_DFLT	(2U << 8)
+#define HC_MCLK_SEL_MASK	(3U << 8)
+#define HC_SELECT_IN_EN		(1U << 18)
+#define HC_SELECT_IN_MASK	(7U << 19)
 #define PWRCTL_BUS_OFF		(1U << 0)
 #define PWRCTL_BUS_ON		(1U << 1)
 #define PWRCTL_IO_LOW		(1U << 2)
@@ -107,6 +115,7 @@ static uint32_t last_int;
 static uint64_t last_ticks;	/* duration of the last cmd() */
 static uint32_t base_khz;	/* SDCC1 apps clock = SDHCI base clock */
 static uint32_t blk[128];	/* one 512-byte block */
+static int xfer_warned;
 
 /* SDHCI 3.0 divided clock: f = base / (2N), N = 1..1023 (0 = undivided) */
 static unsigned div_for(uint32_t khz)
@@ -174,7 +183,7 @@ static int gcc_sdcc1(void)
 static int set_clock(unsigned n)
 {
 	uint32_t c = rd32(H + SDHCI_CLOCK_CONTROL);
-	uint32_t keep = c & 0x00ff0000;		/* timeout control; reset byte stays 0 */
+	uint32_t keep = 0x0e << 16;		/* max data timeout; reset byte stays 0 */
 	wr32(H + SDHCI_CLOCK_CONTROL, keep | (c & 0xffff & ~4U));	/* SD clock off */
 	uint32_t clk = (n & 0xff) << 8 | ((n >> 8) & 3) << 6 | 1;	/* divided mode, internal on */
 	wr32(H + SDHCI_CLOCK_CONTROL, keep | clk);
@@ -187,6 +196,21 @@ static int set_clock(unsigned n)
 }
 
 /* Bus power on raises the msm power IRQ; ack it like sdhci_msm_handle_pwr_irq. */
+/*
+ * ABL leaves the msm wrapper in its HS400 setup. Put it back in the default
+ * mode like msm_hc_select_default(), and hold the DLL in reset/power-down
+ * as sdhci-msm does for bus clocks <= 100 MHz.
+ */
+static void msm_legacy_mode(void)
+{
+	uint32_t vs = rd32(H + MSM_VENDOR_SPEC), dll = rd32(H + MSM_DLL_CONFIG);
+	con_hex2("MSM was", "vspec=", vs, "dll=", dll);
+	vs = (vs & ~(HC_MCLK_SEL_MASK | HC_SELECT_IN_EN | HC_SELECT_IN_MASK)) | HC_MCLK_SEL_DFLT;
+	wr32(H + MSM_VENDOR_SPEC, vs);
+	wr32(H + MSM_DLL_CONFIG, dll | DLL_RST | DLL_PDN);
+	con_hex2("MSM now", "vspec=", rd32(H + MSM_VENDOR_SPEC), "dll=", rd32(H + MSM_DLL_CONFIG));
+}
+
 static uint32_t power_on(void)
 {
 	uint32_t hc = rd32(H + SDHCI_HOST_CONTROL) & ~0xff00U;
@@ -272,9 +296,18 @@ static int read_block(unsigned idx, uint32_t arg)
 	wr32(H + SDHCI_INT_STATUS, INT_READ_READY);
 	for (int i = 0; i < 128; i++)
 		blk[i] = rd32(H + SDHCI_BUFFER);
+	end = ticks() + 50 * TICKS_PER_MS;
 	while (!(rd32(H + SDHCI_INT_STATUS) & (INT_XFER_DONE | INT_ERROR)))
-		if (ticks() > end)
-			return -4;
+		if (ticks() > end) {
+			/* data arrived but no transfer-complete: note it once, reset DAT, use the block */
+			if (!xfer_warned++)
+				con_hex2("XFER?", "ps=", rd32(H + SDHCI_PRESENT_STATE), "int=", rd32(H + SDHCI_INT_STATUS));
+			uint32_t c = rd32(H + SDHCI_CLOCK_CONTROL) & 0x00ffffff;
+			wr32(H + SDHCI_CLOCK_CONTROL, c | 6U << 24);
+			while (rd32(H + SDHCI_CLOCK_CONTROL) & (6U << 24))
+				;
+			return 0;
+		}
 	wr32(H + SDHCI_INT_STATUS, INT_XFER_DONE);
 	return 0;
 }
@@ -314,6 +347,7 @@ static int emmc_read_test(void)
 	if (rc)
 		return fail("GCC", rc);
 	con_hex2("DIV", "ident=", div_for(400), "xfer=", div_for(25000));
+	msm_legacy_mode();
 	con_hex2("PWRCTL", "irq=", power_on(), "hctl=", rd32(H + SDHCI_HOST_CONTROL));
 	wr32(H + SDHCI_INT_ENABLE, 0xfffffeff);	/* status bits on, card IRQ off */
 	wr32(H + SDHCI_SIGNAL_ENABLE, 0);		/* polled: nothing to the GIC */
