@@ -1,0 +1,70 @@
+--- a/bsd/dev/sweet_sdhc.c
++++ b/bsd/dev/sweet_sdhc.c
+@@ -55,6 +55,7 @@
+ #include <libkern/libkern.h>
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern void sweet_sample_start(void);   /* bsd/dev/sweet_sample.c, boot-arg sweetsample */
+ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+@@ -964,6 +965,8 @@
+ 	printf("SWEET SDHC: \"%s\": first sector 0x%llx, %llu MiB, %s, cache %s, DMA at 0x%llx\n",
+ 	    want, sd.first, sd.nsectors >> 11, sd.writable ? "read-write" : "read-only",
+ 	    sd.cache_on ? "on" : "off", sd.dma_pa);
++	/* As sweet_ufs_init does: the daemon sampler, now that a root is coming. */
++	sweet_sample_start();
+ 	return 0;
+ }
+ 
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -79,6 +79,7 @@
+ #include <kern/ipc_tt.h>
+ #include <kern/task.h>
+ #include <kern/thread.h>
++#include <kern/thread_kernel_state.h>   /* SWEET sampler: saved kernel context */
+ #include <kern/processor.h>
+ #include <kern/sched.h>
+ #include <kern/sched_prim.h>
+@@ -993,6 +994,10 @@
+ /*
+  * SWEET process sampler (bsd/dev/sweet_sample.c): user pc/lr/sp and a frame
+  * pointer backtrace of every thread of a task, from the saved user state.
++ * Second line per thread (patch 0086): where it waits in the kernel - run
++ * state, wait event, continuation (stackless wait), x16 (the syscall number
++ * when blocked in a libsystem stub) and the frame chain of its saved kernel
++ * context, kept inside the thread's own kernel stack.
+  */
+ void sweet_sample_task(const char *name, int pid, task_t task);
+ 
+@@ -1034,6 +1039,29 @@
+ 				break;
+ 			}
+ 			fp = frame[0];
++		}
++		printf("%s\n", line);
++
++		n = snprintf(line, sizeof(line), "SMP %s t%d k st 0x%x ev 0x%llx cont 0x%llx x16 %lld kbt",
++		    name, tn - 1, thread->state, (uint64_t)thread->wait_event,
++		    (uint64_t)VM_KERNEL_UNSLIDE((vm_offset_t)thread->continuation), (int64_t)get_saved_state_reg(ss, 16));
++		vm_offset_t top = thread->machine.kstackptr;
++		if (top != 0 && thread != current_thread()) {
++			vm_offset_t bottom = top + sizeof(struct thread_kernel_state) - kernel_stack_size;
++			arm_kernel_saved_state_t *ks = &((thread_kernel_state_t)top)->machine.ss;
++			uint64_t kfp = ks->fp;
++			n += snprintf(line + n, sizeof(line) - n, " 0x%llx", (uint64_t)VM_KERNEL_UNSLIDE(ks->lr));
++			for (int i = 0; i < 16 && n < (int)sizeof(line) - 20; i++) {
++				if (kfp < bottom || kfp + 16 > top || (kfp & 7)) {
++					break;
++				}
++				uint64_t *frame = (uint64_t *)kfp;
++				n += snprintf(line + n, sizeof(line) - n, " 0x%llx", (uint64_t)VM_KERNEL_UNSLIDE(frame[1]));
++				if (frame[0] <= kfp) {
++					break;
++				}
++				kfp = frame[0];
++			}
+ 		}
+ 		printf("%s\n", line);
+ 	}
