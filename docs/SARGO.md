@@ -192,7 +192,14 @@ Stock DT: GPU 0x5000000 (+0x40000), GMU 0x506a000 (+0x31000) and PDC 0xb200000, 
 (CX GDSC 0x106c, GX GDSC 0x100c, CX GMU CBCR 0x1098, CXO 0x109c, GMU RCG 0x1120), GPU SMMU
 `arm,smmu-kgsl@5040000` (qcom,smmu-v2): GPU SID 0 (user) / 2 (secure), GMU SIDs 4/5. GMU register
 offsets in a6xx_gmu.xml are dwords from the GPU base. **t10** (`GPU=1`, shim/gpu.c): GCC GPU clocks,
-CX GDSC on, GMU clocks, GPU SMMU routing dump, GMU CM3 state. Result pending.
+CX GDSC on, GMU clocks, GPU SMMU routing dump, GMU CM3 state. **t10 result (IMG_0060)**: no hang.
+GCC vote1 0x01601d7b (GPLL0 GPU bits off before), cfg AHB already on, memnoc/snoc_dvm enable bits set but
+report off (probably need GPU activity); GPU CC CX/GX GDSC 0x00222001 (collapsed), CX on ->
+0xf8222000 / hwctl 0x80001fe0; CXO + CX GMU clocks run (0x00004221). GPU SMMU sCR0 0x00200626
+(enabled, USFCFG = unmatched fault), IDR0 0x48016605 (5 SMRs), IDR1 0x20008005 (4K pages, 8 global
+pages, 5 CBs); all SMRs invalid, S2CR 0x000200ff (fault): nothing routed, Linux programs it itself.
+GMU: CM3 in reset (sysreset 1), init result 0, no firmware. **t11** (`GPU=gmu`, 58061a3): GMU boot (see
+shim/gpu.c header).
 
 ## Stage plan
 
