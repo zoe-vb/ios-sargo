@@ -30,6 +30,11 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   `xnu-kernel-0088/`, x20 = x19 config, test power (sleep/wake), volume HUD.
   **x20 (`shim/out/sargo/shim-boot-x20.img`, 0088 CI kernel): owner reports all buttons are logged by XNU**
   (2026-10-22). iOS-side effects (volume HUD, power sleep/wake) not reported. Owner then switched priority to the GPU.
+- **GPU (2026-10-22, active): GMU FIRMWARE BOOTS (t12, `f07e925`, IMG_0063)** - shim probe `GPU=gmu`
+  (shim/gpu.c; firmware from factory image PD2A.190115.029 vendor.img in research/sargo-gpu-fw/, embedded at
+  build time, never in git). Details + next steps: docs/SARGO.md "GPU bring-up". Key lesson: the GPU SMMU's
+  firmware drops masked SMRs; exact single-stream SMRs stick. Plan: GLES via Mesa freedreno like
+  joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in

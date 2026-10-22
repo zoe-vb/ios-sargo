@@ -204,7 +204,13 @@ stack pointer); GMU RCG cfg 0x602 (200 MHz) updated; CB 1 CBAR 0x10000, SCTLR 0x
 read back, S2CR0 = 1 stuck, **but SMR0 0x80010004 (streams 4+5, mask 1) read back 0**: dropped, probe
 stopped before the GMU reset release. (ios-sailfish found the same kind of firmware filtering: only an
 exact stream-0 SMR was accepted on its GPU SMMU.) **t12** (f07e925): exact SMRs, stream 5 then 4, slots
-0/1/4/3/2, then the GMU boot if stream 5 sticks.
+0/1/4/3/2, then the GMU boot if stream 5 sticks. **t12 result (IMG_0063): GMU FIRMWARE RUNNING.** Exact SMRs stick
+(SMR0 0x80000005, SMR1 0x80000004 -> CB 1); ITCM verify 0 mismatches; DTCM+0xff8 0 (legacy fw ->
+0xbabeface); CM3_FW_INIT_RESULT = 0xbabeface after ~1 ms; CORE_FW_VERSION 0 (legacy fw), HFI status 0,
+no GMU2HOST/AO interrupts, CB 1 FSR 0x400 (only FORMAT = AArch64, no fault), log/hfi words still 0.
+Next: RPMh/PDC init (a6xx_gmu_rpmh_init, sdm845 PDC 0xb280000 / seq 0xb480000, RSCC = GMU + 0x23000),
+RPMH_CTRL votes, GX/MX vote indexes (cmd-db ARC levels) + OOB BOOT_SLUMBER, SPTPRAC, HFI queues, then
+GX GDSC and the first GPU core register reads (RBBM).
 
 ## Stage plan
 
