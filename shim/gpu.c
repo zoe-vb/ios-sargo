@@ -792,6 +792,20 @@ static int zap_load(void)
 	}
 	for (uint32_t i = 0; i < mdt_size; i++)
 		zap_meta[i] = zap_mdt[i];
+	/*
+	 * t23: downstream pil_boot passes init_image the region start as the
+	 * metadata address - pil_init_image_trusted maps it and copies the .mdt
+	 * into the carveout itself (mdt 0x1a1c fits the 8 KiB region); the code
+	 * segment is copied over it after MEM_SETUP. Do the same.
+	 */
+	volatile uint32_t *reg = (volatile uint32_t *)ZAP_REGION;
+	for (uint32_t i = 0; i < 0x2000 / 4; i++) {
+		uint32_t w = 0;
+		for (unsigned k = 0; k < 4; k++)
+			if (i * 4 + k < mdt_size)
+				w |= (uint32_t)zap_mdt[i * 4 + k] << (8 * k);
+		reg[i] = w;
+	}
 	__asm__ volatile("dsb sy" ::: "memory");
 	/*
 	 * t15 (IMG_0068) hung after INIT_IMAGE/MEM_SETUP returned 0, with no
@@ -804,7 +818,7 @@ static int zap_load(void)
 	 * t15..t17b only checked x0. Show both and stop on either.
 	 */
 	uint64_t ri1 = 0xdead, rm1 = 0xdead;
-	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, (uintptr_t)zap_meta, 0, &ri1);	/* VAL, RW */
+	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, ZAP_REGION, 0, &ri1);	/* VAL, RW: the .mdt in the carveout */
 	con_hex2(" init", "x0=", (uint32_t)ri, "x1=", (uint32_t)ri1);
 	if (ri || ri1) {
 		con_str("ZAP", "INIT_IMAGE refused (x1): auth not attempted");
