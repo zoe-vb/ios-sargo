@@ -37,6 +37,7 @@
  * in secure mode (no zap shader yet, RBBM_SECVID_TRUST_CNTL untouched).
  *
  * t15 (GPU=zap, also -DGPU_ZAP): after the ring test, the zap shader as Linux
+ * (t17: after the full Linux hw_init and CP_ME_INIT alone, see hw_init_tail)
  * qcom_mdt_load + a6xx_zap_shader_init: TZ PAS (SIP SMC64, svc 2) for PAS id
  * 13 (stock DT /soc/qcom,kgsl-hyp): IS_SUPPORTED, INIT_IMAGE with the .mdt
  * (ELF header + hash segment = the metadata), MEM_SETUP of the reserved
@@ -739,6 +740,153 @@ static int zap_load(void)
 }
 #endif
 
+#ifdef GPU_ZAP
+/*
+ * t17: the rest of Linux a6xx hw_init (a615: a615_hwcg, a630_protect,
+ * gmu_cgc_mode 0x222, prim_fifo_threshold 0x18000; UBWC per the stock DT:
+ * highest bank bit 14, UBWC 2.0, 32 B min access), in Linux's order around
+ * the setup cp_test() already did. Tables generated from Linux
+ * a6xx_catalog.c with offsets from registers/adreno/a6xx.xml.
+ */
+static const struct { uint32_t reg, val; } a615_hwcg[] = {
+	{0x000b0, 0x02222222},	/* RBBM_CLOCK_CNTL_SP0 */
+	{0x000b4, 0x02222220},	/* RBBM_CLOCK_CNTL2_SP0 */
+	{0x000b8, 0x00000080},	/* RBBM_CLOCK_DELAY_SP0 */
+	{0x000bc, 0x0000f3cf},	/* RBBM_CLOCK_HYST_SP0 */
+	{0x000c0, 0x02222222},	/* RBBM_CLOCK_CNTL_TP0 */
+	{0x000c1, 0x02222222},	/* RBBM_CLOCK_CNTL_TP1 */
+	{0x000c4, 0x22222222},	/* RBBM_CLOCK_CNTL2_TP0 */
+	{0x000c5, 0x22222222},	/* RBBM_CLOCK_CNTL2_TP1 */
+	{0x000c8, 0x22222222},	/* RBBM_CLOCK_CNTL3_TP0 */
+	{0x000c9, 0x22222222},	/* RBBM_CLOCK_CNTL3_TP1 */
+	{0x000cc, 0x00022222},	/* RBBM_CLOCK_CNTL4_TP0 */
+	{0x000cd, 0x00022222},	/* RBBM_CLOCK_CNTL4_TP1 */
+	{0x000e0, 0x77777777},	/* RBBM_CLOCK_HYST_TP0 */
+	{0x000e1, 0x77777777},	/* RBBM_CLOCK_HYST_TP1 */
+	{0x000e4, 0x77777777},	/* RBBM_CLOCK_HYST2_TP0 */
+	{0x000e5, 0x77777777},	/* RBBM_CLOCK_HYST2_TP1 */
+	{0x000e8, 0x77777777},	/* RBBM_CLOCK_HYST3_TP0 */
+	{0x000e9, 0x77777777},	/* RBBM_CLOCK_HYST3_TP1 */
+	{0x000ec, 0x00077777},	/* RBBM_CLOCK_HYST4_TP0 */
+	{0x000ed, 0x00077777},	/* RBBM_CLOCK_HYST4_TP1 */
+	{0x000d0, 0x11111111},	/* RBBM_CLOCK_DELAY_TP0 */
+	{0x000d1, 0x11111111},	/* RBBM_CLOCK_DELAY_TP1 */
+	{0x000d4, 0x11111111},	/* RBBM_CLOCK_DELAY2_TP0 */
+	{0x000d5, 0x11111111},	/* RBBM_CLOCK_DELAY2_TP1 */
+	{0x000d8, 0x11111111},	/* RBBM_CLOCK_DELAY3_TP0 */
+	{0x000d9, 0x11111111},	/* RBBM_CLOCK_DELAY3_TP1 */
+	{0x000dc, 0x00011111},	/* RBBM_CLOCK_DELAY4_TP0 */
+	{0x000dd, 0x00011111},	/* RBBM_CLOCK_DELAY4_TP1 */
+	{0x0010b, 0x22222222},	/* RBBM_CLOCK_CNTL_UCHE */
+	{0x0010c, 0x22222222},	/* RBBM_CLOCK_CNTL2_UCHE */
+	{0x0010d, 0x22222222},	/* RBBM_CLOCK_CNTL3_UCHE */
+	{0x0010e, 0x00222222},	/* RBBM_CLOCK_CNTL4_UCHE */
+	{0x00110, 0x00000004},	/* RBBM_CLOCK_HYST_UCHE */
+	{0x0010f, 0x00000002},	/* RBBM_CLOCK_DELAY_UCHE */
+	{0x000f0, 0x22222222},	/* RBBM_CLOCK_CNTL_RB0 */
+	{0x000f4, 0x00002222},	/* RBBM_CLOCK_CNTL2_RB0 */
+	{0x000f8, 0x00002020},	/* RBBM_CLOCK_CNTL_CCU0 */
+	{0x000f9, 0x00002220},	/* RBBM_CLOCK_CNTL_CCU1 */
+	{0x000fa, 0x00002220},	/* RBBM_CLOCK_CNTL_CCU2 */
+	{0x000fb, 0x00002220},	/* RBBM_CLOCK_CNTL_CCU3 */
+	{0x00100, 0x00040f00},	/* RBBM_CLOCK_HYST_RB_CCU0 */
+	{0x00101, 0x00040f00},	/* RBBM_CLOCK_HYST_RB_CCU1 */
+	{0x00102, 0x00040f00},	/* RBBM_CLOCK_HYST_RB_CCU2 */
+	{0x00103, 0x00040f00},	/* RBBM_CLOCK_HYST_RB_CCU3 */
+	{0x00104, 0x05022022},	/* RBBM_CLOCK_CNTL_RAC */
+	{0x00105, 0x00005555},	/* RBBM_CLOCK_CNTL2_RAC */
+	{0x00106, 0x00000011},	/* RBBM_CLOCK_DELAY_RAC */
+	{0x00107, 0x00445044},	/* RBBM_CLOCK_HYST_RAC */
+	{0x00108, 0x04222222},	/* RBBM_CLOCK_CNTL_TSE_RAS_RBBM */
+	{0x00114, 0x00222222},	/* RBBM_CLOCK_MODE_GPC */
+	{0x00111, 0x00002222},	/* RBBM_CLOCK_MODE_VFD */
+	{0x0010a, 0x00000000},	/* RBBM_CLOCK_HYST_TSE_RAS_RBBM */
+	{0x00116, 0x04104004},	/* RBBM_CLOCK_HYST_GPC */
+	{0x00113, 0x00000000},	/* RBBM_CLOCK_HYST_VFD */
+	{0x0011c, 0x00000000},	/* RBBM_CLOCK_DELAY_HLSQ */
+	{0x00109, 0x00004000},	/* RBBM_CLOCK_DELAY_TSE_RAS_RBBM */
+	{0x00115, 0x00000200},	/* RBBM_CLOCK_DELAY_GPC */
+	{0x00112, 0x00002222},	/* RBBM_CLOCK_DELAY_VFD */
+	{0x00117, 0x00000002},	/* RBBM_CLOCK_DELAY_HLSQ_2 */
+	{0x0011b, 0x00002222},	/* RBBM_CLOCK_MODE_HLSQ */
+	{0x00118, 0x00000222},	/* RBBM_CLOCK_CNTL_GMU_GX */
+	{0x00119, 0x00000111},	/* RBBM_CLOCK_DELAY_GMU_GX */
+	{0x0011a, 0x00000555},	/* RBBM_CLOCK_HYST_GMU_GX */
+};
+static const uint32_t a630_protect[32] = {
+	0x13fc0000,
+	0x00140501,
+	0x0bd0050b,
+	0x8000050e,
+	0x80000510,
+	0x80000534,
+	0x82080800,
+	0x802008a0,
+	0x809008ab,
+	0x02b808de,
+	0x81340900,
+	0x89c8098d,
+	0x80040e00,
+	0x80300e03,
+	0x830c3c00,
+	0x7ffc3cc4,
+	0x873c8630,
+	0x80008e00,
+	0x80008e08,
+	0x807c8e50,
+	0x876c9624,
+	0x80049e70,
+	0x861c9e78,
+	0x873ca630,
+	0x8000ae02,
+	0x8cbcae50,
+	0x8000b604,
+	0x8004be02,
+	0xdf7cbe20,
+	0xaffcf000,
+	0x7ffcfc00,
+	0x80011c00
+};
+
+static void hwcg_on(void)
+{
+	wr(GMU_REG(0x23b09), 0x222);			/* GPU_GMU_AO_GMU_CGC_MODE_CNTL */
+	wr(GMU_REG(0x23b0a), 0x111);			/* .. DELAY */
+	wr(GMU_REG(0x23b0b), 0x555);			/* .. HYST */
+	if (gpu_r(0x00ae) == 0x8aa8aa82u)		/* RBBM_CLOCK_CNTL already on */
+		return;
+	wr(GMU_REG(0x1a880), rd(GMU_REG(0x1a880)) & ~1u);	/* SPTPRAC clock off */
+	for (unsigned i = 0; i < sizeof(a615_hwcg) / sizeof(a615_hwcg[0]); i++)
+		gpu_w(a615_hwcg[i].reg, a615_hwcg[i].val);
+	wr(GMU_REG(0x1a880), rd(GMU_REG(0x1a880)) | 1u);
+	gpu_w(0x00ae, 0x8aa8aa82u);
+}
+
+static void hw_init_tail(void)
+{
+	gpu_w(0x9e00, 0x0018000);			/* PC_DBG_ECO_CNTL: prim fifo */
+	/* (CP_AHB_CNTL done by the caller) */
+	gpu_w(0x0500, 1);				/* RBBM_PERFCTR_CNTL */
+	gpu_w(0x08d0, 0);				/* CP_PERFCTR_CP_SEL(0) = ALWAYS_COUNT */
+	gpu_w(0x8e08, 1u << 4 | 1u << 1);		/* RB_NC_MODE_CNTL: amsbc, hbb_lo 1 */
+	gpu_w(0xb604, 1u << 1);				/* TPL1_NC_MODE_CNTL */
+	gpu_w(0xae02, 1u << 1);				/* SP_NC_MODE_CNTL */
+	gpu_w(0x0e01, 1u << 21);			/* UCHE_MODE_CNTL */
+	gpu_w(0x0534, 0);				/* RBBM_NC_MODE_CNTL */
+	gpu_w(0x001f, (1u << 30) | 0x1fffff);		/* RBBM_INTERFACE_HANG_INT_CNTL */
+	gpu_w(0x0e19, (1u << 7) | 1u);			/* UCHE_CLIENT_PF */
+	wr(GMU_REG(0x23b0e), 0xff000000u);		/* GPU_GMU_AO_GPU_CX_BUSY_MASK */
+	wr(GMU_REG(0x1f841), (rd(GMU_REG(0x1f841)) & ~0xffu) | (1u << 5));	/* POWER_COUNTER_SELECT_0 */
+	wr(GMU_REG(0x1f840), 1);			/* POWER_COUNTER_ENABLE */
+	gpu_w(0x084f, 0xb);				/* CP_PROTECT_CNTL: enable, fault, last span inf */
+	for (unsigned i = 0; i < 31; i++)
+		if (a630_protect[i])
+			gpu_w(0x0850 + i, a630_protect[i]);
+	gpu_w(0x0850 + 31, a630_protect[31]);
+	gpu_w(0x0038, 0x3d0e242);			/* RBBM_INT_0_MASK: A6XX_INT_MASK */
+}
+#endif
+
 /* the CP part of Linux a6xx hw_init + a6xx_cp_init + a ring write test */
 static void cp_test(void)
 {
@@ -757,7 +905,13 @@ static void cp_test(void)
 	    0xa601, 0x9601, 0x0e00, 0xae01, 0xb601, 0xf810 };
 	for (unsigned i = 0; i < sizeof(addr_mode) / sizeof(addr_mode[0]); i++)
 		gpu_w(addr_mode[i], 1);			/* 64-bit addressing */
+#ifdef GPU_ZAP
+	hwcg_on();
+#endif
 	gpu_w(0x0010, 3);				/* RBBM_VBIF_CLIENT_QOS_CNTL */
+#ifdef GPU_ZAP
+	gpu_w(0x050b, 0xffffffffu);			/* RBBM_PERFCTR_GPU_BUSY_MASKED */
+#endif
 	uint64_t trap = 0x1fffffffff000ull;
 	gpu_w64(0x0e05, trap + 0xfc0);			/* UCHE_WRITE_RANGE_MAX */
 	gpu_w64(0x0e09, trap);				/* UCHE_TRAP_BASE */
@@ -770,6 +924,9 @@ static void cp_test(void)
 	gpu_w(0x08c1, 0x8040362c);			/* CP_ROQ_THRESHOLDS_1 */
 	gpu_w(0x08c3, 128);				/* CP_MEM_POOL_SIZE */
 	gpu_w(0x098d, 1);				/* CP_AHB_CNTL: AHB error response */
+#ifdef GPU_ZAP
+	hw_init_tail();
+#endif
 
 	volatile uint32_t *mem = (volatile uint32_t *)gpu_mem;
 	for (uint32_t i = 0; i < (sqe_size - 4) / 4; i++)
@@ -792,10 +949,12 @@ static void cp_test(void)
 	ring[n++] = 0x20000000;
 	ring[n++] = 0; ring[n++] = 0; ring[n++] = 0; ring[n++] = 0; ring[n++] = 0;
 	unsigned after_init = n;
+#ifndef GPU_ZAP		/* t17: Linux runs only CP_ME_INIT, waits for idle, then loads the zap */
 	ring[n++] = pkt7(0x3d, 3);			/* CP_MEM_WRITE */
 	ring[n++] = GPU_IOVA + GPU_TARGET;
 	ring[n++] = 0;
 	ring[n++] = 0xc0ffee15u;
+#endif
 	__asm__ volatile("dsb sy" ::: "memory");
 	gpu_w(0x0807, n);				/* CP_RB_WPTR */
 
@@ -804,6 +963,10 @@ static void cp_test(void)
 	for (ms = 0; ms < 200; ms++) {
 		rptr = gpu_r(0x0806);
 		got = mem[GPU_TARGET / 4];
+#ifdef GPU_ZAP
+		if (rptr == n && !(gpu_r(RBBM_STATUS) & (1u << 23)))	/* GPU_BUSY_IGN_AHB clear: idle */
+			got = 0xc0ffee15u;
+#endif
 		if (rptr == n && got == 0xc0ffee15u)
 			break;
 		udelay(1000);
@@ -814,7 +977,11 @@ static void cp_test(void)
 	CPDETAIL(con_hex2(" fault", "cphw=", gpu_r(0x0821), "int0=", gpu_r(RBBM_INT_0_STATUS)));
 	CPDETAIL(con_hex2(" cp", "status1=", gpu_r(0x0825), "trust=", gpu_r(0xf400)));
 	CPDETAIL(con_hex2(" cb1", "fsr=", rd(GSMMU_CB(GPU_CB) + 0x58), "far=", rd(GSMMU_CB(GPU_CB) + 0x60)));
+#ifdef GPU_ZAP
+	con_str("CP", got == 0xc0ffee15u ? "ME_INIT done, GPU idle" : "CP not idle after ME_INIT");
+#else
 	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
+#endif
 #ifdef GPU_ZAP
 	if (got != 0xc0ffee15u || !zap_load())
 		return;
