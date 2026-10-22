@@ -37,7 +37,8 @@
  * in secure mode (no zap shader yet, RBBM_SECVID_TRUST_CNTL untouched).
  *
  * t15 (GPU=zap, also -DGPU_ZAP): after the ring test, the zap shader as Linux
- * (t17: after the full Linux hw_init and CP_ME_INIT alone, see hw_init_tail)
+ * (t17: after the full Linux hw_init and CP_ME_INIT alone, see hw_init_tail;
+ * t19: before the SQE starts, as downstream KGSL a6xx_microcode_load)
  * qcom_mdt_load + a6xx_zap_shader_init: TZ PAS (SIP SMC64, svc 2) for PAS id
  * 13 (stock DT /soc/qcom,kgsl-hyp): IS_SUPPORTED, INIT_IMAGE with the .mdt
  * (ELF header + hash segment = the metadata), MEM_SETUP of the reserved
@@ -961,6 +962,17 @@ static void cp_test(void)
 	gpu_w64(0x0830, GPU_IOVA);			/* CP_SQE_INSTR_BASE */
 	gpu_w64(0x0800, GPU_IOVA + GPU_RING);		/* CP_RB_BASE */
 	gpu_w(0x0802, (1u << 27) | (2u << 8) | 9u);	/* CP_RB_CNTL: no rptr update, 32 B blocks, 4 KiB */
+#ifdef GPU_ZAP
+	/*
+	 * t19: downstream KGSL (the driver this TZ shipped with) loads the zap
+	 * in a6xx_microcode_load, after CP_SQE_INSTR_BASE and before the SQE is
+	 * started; mainline does it after CP_ME_INIT. t15..t18 used mainline's
+	 * order and AUTH_AND_RESET never returned. Use downstream's.
+	 */
+	int zap_ok = zap_load();
+	if (!zap_ok)
+		return;
+#endif
 	gpu_w(0x0808, 1);				/* CP_SQE_CNTL: start the SQE */
 
 	unsigned n = 0;
@@ -1004,7 +1016,7 @@ static void cp_test(void)
 	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
 #endif
 #ifdef GPU_ZAP
-	if (got != 0xc0ffee15u || !zap_load())
+	if (got != 0xc0ffee15u)
 		return;
 	unsigned start = n;
 	ring[n++] = pkt7(0x66, 1);			/* CP_SET_SECURE_MODE */
