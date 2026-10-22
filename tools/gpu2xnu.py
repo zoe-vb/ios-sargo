@@ -92,10 +92,10 @@ pre = r'''/*
 #include <pexpert/device_tree.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
-typedef unsigned int boolean_t;
-extern boolean_t ml_set_interrupts_enabled(boolean_t);
-/* mask IRQs around the SMC loop: a live kernel takes interrupts during the
- * slow PAS signature verify, making TZ spin on INTERRUPTED (t30). */
+/* boolean_t and ml_set_interrupts_enabled come from <machine/machine_routines.h>
+ * (already included). Mask IRQs around the SMC loop: a live kernel takes
+ * interrupts during the slow PAS signature verify, making TZ spin on
+ * INTERRUPTED (t30). */
 #define SCM_IRQ_SAVE	boolean_t _scm_i = 0
 #define SCM_IRQ_OFF()	(_scm_i = ml_set_interrupts_enabled(0))
 #define SCM_IRQ_ON()	((void)ml_set_interrupts_enabled(_scm_i))
