@@ -443,6 +443,110 @@ static int gx_vote(unsigned level, unsigned *gx, unsigned *mx)
 	return *gx < np;
 }
 
+/* a6xx_gmu_rpmh_arc_votes_init for one level: (pri level << 16) | (sec idx << 8) | pri idx */
+static uint32_t arc_vote(const char *pri_id, unsigned level)
+{
+	unsigned np = 0, ns = 0, pi = 0, si = 0;
+	const uint16_t *pri = cmd_db_aux(pri_id, &np), *sec = cmd_db_aux("mx.lvl", &ns);
+	if (!pri || !sec || !np || !ns || np > 16 || ns > 16)
+		return 0xffffffffu;
+	for (unsigned j = 0; j < np; j++)
+		if (pri[j] >= level) {
+			pi = j;
+			break;
+		}
+	for (unsigned j = 0; j < ns; j++) {
+		if (sec[j] >= level) {
+			si = j;
+			break;
+		} else if (sec[j]) {
+			si = j;
+		}
+	}
+	return (uint32_t)pri[pi] << 16 | si << 8 | pi;
+}
+
+/*
+ * HFI v1 messages (a6xx_hfi_send_msg): command queue at hfi + 4K (header
+ * 0), response queue at hfi + 8K (header 1), legacy = no 4-dword padding.
+ * Returns 0, or 0x100 | step on a timeout / bad response, or the GMU's
+ * error code.
+ */
+static uint32_t hfi_seq;
+static uint32_t hfi_send(uint32_t id, uint32_t *msg, uint32_t dwords)
+{
+	uint32_t *tbl = (uint32_t *)(gmu_mem + 0x1000);
+	volatile uint32_t *cq = (volatile uint32_t *)(gmu_mem + 0x2000), *rq = (volatile uint32_t *)(gmu_mem + 0x3000);
+	volatile uint32_t *ch = (volatile uint32_t *)(tbl + 6), *rh = (volatile uint32_t *)(tbl + 6 + 12);
+	uint32_t seq = ++hfi_seq % 0xfff;
+	msg[0] = seq << 20 | 0u << 16 | dwords << 8 | id;
+	uint32_t w = ch[11];
+	for (uint32_t i = 0; i < dwords; i++) {
+		cq[w] = msg[i];
+		w = (w + 1) % 1024;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	ch[11] = w;
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(GMU_REG(GMU_HOST2GMU_INTR_SET), 1);
+	for (unsigned tries = 0; tries < 4; tries++) {
+		int got = 0;
+		for (unsigned i = 0; i < 50 && !got; i++)	/* ~100 ms */
+			got = wait_bits(GMU_REG(GMU_GMU2HOST_INTR_INFO), 1u, 1u);
+		if (!got)
+			return 0x100 | 1;
+		wr(GMU_REG(GMU_GMU2HOST_INTR_CLR), 1);
+		while (rh[10] != rh[11]) {
+			uint32_t r0 = rh[10], hdr = rq[r0], n = (hdr >> 8) & 0xff, resp[8] = {0};
+			for (uint32_t i = 0; i < n; i++) {
+				if (i < 8)
+					resp[i] = rq[r0];
+				r0 = (r0 + 1) % 1024;
+			}
+			rh[10] = r0;
+			__asm__ volatile("dsb sy" ::: "memory");
+			if ((hdr & 0xff) == 100)		/* HFI_F2H_MSG_ERROR */
+				return 0x200 | (resp[1] & 0xff);
+			if (((resp[1] >> 20) & 0xfff) == seq)
+				return resp[2];			/* error field, 0 = ok */
+		}
+	}
+	return 0x100 | 2;
+}
+
+/* a6xx_hfi_start_v1 */
+static void hfi_start_v1(void)
+{
+	uint32_t m[1 + 5 + 16 * 8 + 6 * 2 + 8 + 16 * 8 + 4];
+	uint32_t res[5];
+	for (unsigned i = 0; i < sizeof(m) / 4; i++) m[i] = 0;
+	m[2] = GMU_IOVA + 0x9000; m[3] = 0x4000; m[4] = 1;	/* GMU_INIT: debug buffer, cold boot */
+	res[0] = hfi_send(0, m, 5);
+	for (unsigned i = 0; i < 2; i++) m[i] = 0;
+	m[1] = (1u << 28) | (1u << 19) | (1u << 17);		/* FW_VERSION: 1.10 */
+	res[1] = hfi_send(1, m, 2);
+	for (unsigned i = 0; i < 3 + 2 * 16 + 2 * 4; i++) m[i] = 0;
+	m[1] = 2; m[2] = 2;					/* PERF_TABLE v1: off + MIN_SVS */
+	m[3] = arc_vote("gfx.lvl", 0);   m[4] = 0;
+	uint32_t gxv = arc_vote("gfx.lvl", 48);
+	m[5] = gxv;  m[6] = 180000;			/* 180 MHz, kHz */
+	m[3 + 32] = arc_vote("cx.lvl", 0);   m[4 + 32] = 0;
+	m[5 + 32] = arc_vote("cx.lvl", 48);  m[6 + 32] = 200000;	/* GMU 200 MHz */
+	res[2] = hfi_send(4, m, 3 + 2 * 16 + 2 * 4);
+	uint32_t bw = 6 + 6 + 12 + 8 + 128;			/* a6xx_build_bw_table */
+	for (unsigned i = 0; i < bw; i++) m[i] = 0;
+	m[1] = 1; m[2] = 3; m[3] = 3; m[4] = 0x05; m[5] = 0x07;
+	m[6] = 0x50034; m[7] = 0x5007c; m[8] = 0x5004c;		/* cnoc addrs */
+	m[12] = 0x40000000; m[13] = 0; m[14] = 0x40000000;	/* cnoc data[0] */
+	m[18] = 0x60000001; m[19] = 0x20000001; m[20] = 0x60000001;	/* cnoc data[1] */
+	m[24] = 0x50000; m[25] = 0x5005c; m[26] = 0x5000c;	/* ddr addrs */
+	m[32] = 0x40000000; m[33] = 0x40000000; m[34] = 0x40000000;	/* ddr data[0] */
+	res[3] = hfi_send(3, m, bw);
+	res[4] = hfi_send(5, m, 1);				/* TEST: no more messages */
+	con_hex2(" hfimsg", "init/ver=", res[0] << 16 | (res[1] & 0xffff), "perf/bw=", res[2] << 16 | (res[3] & 0xffff));
+	con_hex2(" hfimsg", "test=", res[4], "gx vote=", gxv);
+}
+
 /* HFI v1 queue table: command, response (id 4), debug (id 5) queues */
 static void hfi_table_init(void)
 {
@@ -713,10 +817,9 @@ static void gx_on_and_probe(void)
 	 * crashed); t13 (slow, lots of console output between steps) got the
 	 * ack. t15d: 50 ms before the request, and the state just before it.
 	 */
-	udelay(50000);
-	con_hex2(" pre", "g2h=", rd(GMU_REG(GMU_GMU2HOST_INTR_INFO)), "ao=", rd(GMU_REG(GMU_AO_HOST_INTR_STATUS)));
+	/* t15d: the GMU is clean before GPU_SET and faults (CM3_FAULT) on it: send Linux's HFI v1 setup first */
+	hfi_start_v1();
 	gmu_oob(" oob gpu", 16, 24);
-	con_hex2(" log", "w0=", *(volatile uint32_t *)(gmu_mem + 0x5000), "w1=", *(volatile uint32_t *)(gmu_mem + 0x5004));
 
 	uint32_t st = rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS));
 	con_hex2("GX", "gdscr=", rd(GPUCC + GPUCC_GX_GDSCR), "sptprac=", st);
