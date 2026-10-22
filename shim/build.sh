@@ -36,6 +36,8 @@ fi
 command -v mkbootimg >/dev/null && MKBOOTIMG=mkbootimg || MKBOOTIMG="python3 ../tools/mkbootimg.py"
 # TOUCH=1 (sargo): the diagnostic screen runs the touch probe instead of the eMMC test
 [ -n "${TOUCH:-}" ] && BDEF="$BDEF -DBRINGUP_TOUCH"
+# TOUCH=dump: only dump the SMMU stream routing
+[ "${TOUCH:-}" = dump ] && BDEF="$BDEF -DTOUCH_SMMU_DUMP"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $BDEF"
 # sweet keeps the historical out/ (NOTES.md refers to it)
 [ $BOARD = sweet ] && OUT=out || OUT=out/$BOARD

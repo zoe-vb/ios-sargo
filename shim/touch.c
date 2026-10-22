@@ -412,6 +412,42 @@ static int smmu_bypass(unsigned sid)
 	return 1;
 }
 
+/*
+ * t05: the system stops within ~1 ms of the first doorbell even with the
+ * CB 46 (SCTLR.M = 0) workaround: likely the secure side faulting GSI's
+ * untranslated access. Dump how the firmware routes the streams that do
+ * work (the eMMC has no iommus but DMAs fine) to copy that for 0x6d6.
+ * Per valid SMR: index, SMR, S2CR; for S2CR type translate also CBAR/SCTLR.
+ */
+static void smmu_dump(void)
+{
+	uint32_t idr0 = rd(SMMU + 0x20), idr1 = rd(SMMU + 0x24);
+	unsigned n = idr0 & 0xff, pgsize = (idr1 >> 31) ? 0x10000 : 0x1000;
+	unsigned npage = 1u << (((idr1 >> 28) & 7) + 1), shown = 0;
+	con_hex2("SMMU", "scr0=", rd(SMMU), "gfsr=", rd(SMMU + 0x48));
+	con_hex2(" ids", "idr0=", idr0, "idr1=", idr1);
+	for (unsigned i = 0; i < n && shown < 44; i++) {
+		uint32_t smr = rd(SMMU + 0x800 + 4 * i);
+		if (!(smr & (1u << 31)))
+			continue;
+		uint32_t s2cr = rd(SMMU + 0xc00 + 4 * i);
+		char lbl[] = "S00";
+		lbl[1] = "0123456789ABCDEF"[i >> 4];
+		lbl[2] = "0123456789ABCDEF"[i & 15];
+		if (((s2cr >> 16) & 3) == 0) {
+			unsigned cb = s2cr & 0xff;
+			uint32_t cbar = rd(SMMU + pgsize + 4 * cb);
+			uint32_t sctlr = rd(SMMU + (uintptr_t)npage * pgsize + (uintptr_t)cb * pgsize);
+			con_hex2(lbl, "smr=", smr, "s2cr=", s2cr);
+			con_hex2(" cb", "cbar=", cbar, "sctlr=", sctlr);
+			shown += 2;
+		} else {
+			con_hex2(lbl, "smr=", smr, "s2cr=", s2cr);
+			shown++;
+		}
+	}
+}
+
 static void put_tre(uint32_t *ring, unsigned *wp, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
 {
 	uint32_t *t = &ring[*wp * 4];
@@ -557,6 +593,10 @@ static void hexline(const char *label, const uint8_t *b, unsigned n)
 void test_touch(void)
 {
 	con_str("TOUCH", "RMI4 0x20 on i2c9 (SE @ A84000)");
+#ifdef TOUCH_SMMU_DUMP
+	smmu_dump();
+	return;
+#endif
 	smmu_probe(0x6d6);
 	if (!smmu_bypass(0x6d6))
 		return;
