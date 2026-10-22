@@ -617,7 +617,7 @@ static uint32_t pm4_parity(uint32_t v)
 	    (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1u;
 }
 
-static uint32_t pkt4(unsigned reg, unsigned cnt)
+static uint32_t __attribute__((unused)) pkt4(unsigned reg, unsigned cnt)
 {
 	return 0x40000000u | (cnt & 0x7f) | pm4_parity(cnt) << 7 | (reg & 0x3ffff) << 8 | pm4_parity(reg) << 27;
 }
