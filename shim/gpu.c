@@ -638,8 +638,21 @@ static uint32_t pkt7(unsigned op, unsigned cnt)
  * spins forever (looks like a hang). Cap and report instead.
  */
 static uint32_t scm_intr;	/* INTERRUPTED spins of the last scm() call */
+/*
+ * t30: the shim runs with IRQs masked so TZ ran the PAS calls to completion
+ * (intr=0). A live kernel (XNU) takes interrupts during the slow signature
+ * verify, TZ returns INTERRUPTED, and on one CPU the thread spins. Mask IRQs
+ * around the SMC loop to reproduce the shim's working environment. No-op in
+ * the shim; gpu2xnu.py redefines these to ml_set_interrupts_enabled().
+ */
+#ifndef SCM_IRQ_SAVE
+#define SCM_IRQ_SAVE	int _scm_i = 0; (void)_scm_i
+#define SCM_IRQ_OFF()	do { } while (0)
+#define SCM_IRQ_ON()	do { } while (0)
+#endif
 static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t *res)
 {
+	SCM_IRQ_SAVE;
 	register uint64_t x0 __asm__("x0");
 	register uint64_t x1 __asm__("x1");
 	register uint64_t x2 __asm__("x2");
@@ -649,6 +662,7 @@ static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1,
 	register uint64_t x6 __asm__("x6");
 	register uint64_t x7 __asm__("x7");
 	scm_intr = 0;
+	SCM_IRQ_OFF();
 	for (unsigned tries = 0; tries < 20; tries++) {
 		uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
 		do {	/* QCOM_SCM_INTERRUPTED (1): resume with x0 = 1, x6 as returned */
@@ -665,6 +679,7 @@ static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1,
 			break;
 		udelay(30000);
 	}
+	SCM_IRQ_ON();
 	if (res)
 		*res = x1;
 	return (int64_t)x0;
@@ -728,9 +743,11 @@ static uint32_t rpmh_bcm_vote(const char *id, uint32_t data)
 static int64_t scm5(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2,
     uint64_t a3, uint64_t *res)
 {
+	SCM_IRQ_SAVE;
 	register uint64_t x0 __asm__("x0"), x1 __asm__("x1"), x2 __asm__("x2"), x3 __asm__("x3");
 	register uint64_t x4 __asm__("x4"), x5 __asm__("x5"), x6 __asm__("x6"), x7 __asm__("x7");
 	uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
+	SCM_IRQ_OFF();
 	do {
 		x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = a3; x6 = sess; x7 = 0;
 		__asm__ volatile("smc #0"
@@ -739,6 +756,7 @@ static int64_t scm5(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1
 		fn = 1;
 		sess = x6;
 	} while (x0 == 1);
+	SCM_IRQ_ON();
 	if (res)
 		*res = x1;
 	return (int64_t)x0;

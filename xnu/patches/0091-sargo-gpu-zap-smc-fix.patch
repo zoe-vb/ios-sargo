@@ -1,6 +1,20 @@
 --- a/bsd/dev/sweet_sargo_gpu.c
 +++ b/bsd/dev/sweet_sargo_gpu.c
-@@ -314,6 +314,11 @@
+@@ -23,6 +23,13 @@
+ #include <pexpert/device_tree.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++typedef unsigned int boolean_t;
++extern boolean_t ml_set_interrupts_enabled(boolean_t);
++/* mask IRQs around the SMC loop: a live kernel takes interrupts during the
++ * slow PAS signature verify, making TZ spin on INTERRUPTED (t30). */
++#define SCM_IRQ_SAVE	boolean_t _scm_i = 0
++#define SCM_IRQ_OFF()	(_scm_i = ml_set_interrupts_enabled(0))
++#define SCM_IRQ_ON()	((void)ml_set_interrupts_enabled(_scm_i))
+ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+ extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ extern vm_map_address_t phystokv(uint64_t);
+@@ -314,7 +321,12 @@
  #define GPU_IOVA	(GMU_IOVA + 0x100000)	/* same L3 table, entries 256.. */
  #define GPU_RING	0x8000			/* offsets in gpu_mem */
  #define GPU_TARGET	0x9000
@@ -8,11 +22,12 @@
 +#define BLIT_W		64u
 +#define BLIT_H		64u
 +#define BLIT_TARGET	0xa000u		/* in gpu_mem: 64x64 BGRA */
-+#endif
  #endif
++#endif
  #ifdef GPU_ZAP
  /* stock (Android 9) DT gpu_region; mainline sdm670-google-common has gpu@97a15000 (ZAPREGION=mainline) */
-@@ -323,6 +328,9 @@
+ #ifdef ZAP_REGION_MAINLINE
+@@ -323,6 +335,9 @@
  #define ZAP_REGION	0x95c15000UL
  #endif
  #define ZAP_PAS_ID	13
@@ -22,7 +37,7 @@
  #endif
  
  static int gmu_clock_200(void)
-@@ -679,6 +687,11 @@
+@@ -679,6 +694,11 @@
  	    (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1u;
  }
  
@@ -34,7 +49,7 @@
  static uint32_t pkt7(unsigned op, unsigned cnt)
  {
  	return 0x70000000u | cnt | pm4_parity(cnt) << 15 | (op & 0x7fu) << 16 | pm4_parity(op) << 23;
-@@ -686,23 +699,37 @@
+@@ -686,28 +706,57 @@
  
  #ifdef GPU_ZAP
  /* qcom_scm SMCCC convention: SIP, SMC64, standard call; x0 status, x1 result */
@@ -47,6 +62,18 @@
 + * spins forever (looks like a hang). Cap and report instead.
 + */
 +static uint32_t scm_intr;	/* INTERRUPTED spins of the last scm() call */
++/*
++ * t30: the shim runs with IRQs masked so TZ ran the PAS calls to completion
++ * (intr=0). A live kernel (XNU) takes interrupts during the slow signature
++ * verify, TZ returns INTERRUPTED, and on one CPU the thread spins. Mask IRQs
++ * around the SMC loop to reproduce the shim's working environment. No-op in
++ * the shim; gpu2xnu.py redefines these to ml_set_interrupts_enabled().
++ */
++#ifndef SCM_IRQ_SAVE
++#define SCM_IRQ_SAVE	int _scm_i = 0; (void)_scm_i
++#define SCM_IRQ_OFF()	do { } while (0)
++#define SCM_IRQ_ON()	do { } while (0)
++#endif
  static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t *res)
  {
 -	register uint64_t x0 __asm__("x0") = 0x42000000u | svc_cmd;
@@ -56,6 +83,7 @@
 -	register uint64_t x4 __asm__("x4") = a2;
 -	register uint64_t x5 __asm__("x5") = 0;
 -	register uint64_t x6 __asm__("x6") = 0;
++	SCM_IRQ_SAVE;
 +	register uint64_t x0 __asm__("x0");
 +	register uint64_t x1 __asm__("x1");
 +	register uint64_t x2 __asm__("x2");
@@ -65,6 +93,7 @@
 +	register uint64_t x6 __asm__("x6");
 +	register uint64_t x7 __asm__("x7");
 +	scm_intr = 0;
++	SCM_IRQ_OFF();
  	for (unsigned tries = 0; tries < 20; tries++) {
  		uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
  		do {	/* QCOM_SCM_INTERRUPTED (1): resume with x0 = 1, x6 as returned */
@@ -82,17 +111,27 @@
  		} while (x0 == 1);
  		if ((int64_t)x0 != -12)		/* QCOM_SCM_V2_EBUSY */
  			break;
-@@ -767,6 +794,85 @@
+ 		delay(30000);
+ 	}
++	SCM_IRQ_ON();
+ 	if (res)
+ 		*res = x1;
+ 	return (int64_t)x0;
+@@ -765,6 +814,88 @@
+ 	wr(RSC_TCS + 0x00, irq_en);
+ 	con_hex2(" bcm", "addr=", addr, "status=", st);
  	return st;
- }
- 
++}
++
 +/* scm() with a fourth argument in x5 (downstream scm_call2: args[3], or the extra-args buffer) */
 +static int64_t scm5(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2,
 +    uint64_t a3, uint64_t *res)
 +{
++	SCM_IRQ_SAVE;
 +	register uint64_t x0 __asm__("x0"), x1 __asm__("x1"), x2 __asm__("x2"), x3 __asm__("x3");
 +	register uint64_t x4 __asm__("x4"), x5 __asm__("x5"), x6 __asm__("x6"), x7 __asm__("x7");
 +	uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
++	SCM_IRQ_OFF();
 +	do {
 +		x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = a3; x6 = sess; x7 = 0;
 +		__asm__ volatile("smc #0"
@@ -101,6 +140,7 @@
 +		fn = 1;
 +		sess = x6;
 +	} while (x0 == 1);
++	SCM_IRQ_ON();
 +	if (res)
 +		*res = x1;
 +	return (int64_t)x0;
@@ -163,12 +203,10 @@
 +	int64_t rh = scm5(0x0c16, 7 | (1u << 4) | (1u << 8) | (1u << 12),	/* RO, VAL, RO, VAL, RO, VAL, VAL */
 +	    (uintptr_t)info, 16, (uintptr_t)src, (uintptr_t)ext, &x1);
 +	con_hex2(" hypassign", "x0=", (uint32_t)rh, "x1=", (uint32_t)x1);
-+}
-+
+ }
+ 
  /* Linux qcom_mdt_load + qcom_scm_pas_auth_and_reset for the a615 zap shader */
- static int zap_load(void)
- {
-@@ -781,6 +887,20 @@
+@@ -781,6 +912,20 @@
  	}
  	for (uint32_t i = 0; i < mdt_size; i++)
  		zap_meta[i] = zap_mdt[i];
@@ -189,7 +227,7 @@
  	__asm__ volatile("dsb sy" ::: "memory");
  	/*
  	 * t15 (IMG_0068) hung after INIT_IMAGE/MEM_SETUP returned 0, with no
-@@ -793,7 +913,7 @@
+@@ -793,7 +938,7 @@
  	 * t15..t17b only checked x0. Show both and stop on either.
  	 */
  	uint64_t ri1 = 0xdead, rm1 = 0xdead;
@@ -198,7 +236,7 @@
  	con_hex2(" init", "x0=", (uint32_t)ri, "x1=", (uint32_t)ri1);
  	if (ri || ri1) {
  		con_str("ZAP", "INIT_IMAGE refused (x1): auth not attempted");
-@@ -826,6 +946,14 @@
+@@ -826,6 +971,14 @@
  	CPDETAIL(con_hex2(" gx", "sptprac=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)), "trust=", rd(GPU + 0xf400 * 4)));
  	rpmh_bcm_vote("CE0", (1u << 30) | (1u << 29) | (1u << 14) | 1u);	/* commit, valid, x=1, y=1 */
  	/*
@@ -213,7 +251,7 @@
  	 * t21: Linux makes this call with IRQs enabled and services them; the
  	 * shim runs masked with no handler, and t17+ enabled the GPU's
  	 * interrupts. Show what is pending, then quiesce every source the shim
-@@ -835,9 +963,9 @@
+@@ -835,9 +988,9 @@
  	__asm__ volatile("mrs %0, isr_el1" : "=r"(isr));
  	__asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(cntp));
  	__asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(cntv));
@@ -226,7 +264,7 @@
  	/* (the shim also switched the EL1 timers off here; XNU needs them) */
  	gpu_w(0x0038, 0);				/* RBBM_INT_0_MASK */
  	wr(GMU_REG(0x23b06), 0xffffffffu);		/* GMU_AO_HOST_INTERRUPT_MASK */
-@@ -851,7 +979,9 @@
+@@ -851,7 +1004,9 @@
  	con_hex2(" quiet", "isr=", (uint32_t)isr, "spi pend=", rd(0x17a00000UL + 0x224));
  	con_str(" pas", "AUTH_AND_RESET...");
  	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
@@ -237,7 +275,7 @@
  	return rr == 0;
  }
  #endif
-@@ -1058,14 +1188,13 @@
+@@ -1058,14 +1213,13 @@
  	gpu_w(0x0802, (1u << 27) | (2u << 8) | 9u);	/* CP_RB_CNTL: no rptr update, 32 B blocks, 4 KiB */
  #ifdef GPU_ZAP
  	/*
@@ -258,7 +296,7 @@
  #endif
  	gpu_w(0x0808, 1);				/* CP_SQE_CNTL: start the SQE */
  
-@@ -1109,9 +1238,89 @@
+@@ -1109,9 +1263,89 @@
  #else
  	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
  #endif
