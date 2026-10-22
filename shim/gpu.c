@@ -909,8 +909,9 @@ static int zap_load(void)
 	con_hex2(" quiet", "isr=", (uint32_t)isr, "spi pend=", rd(0x17a00000UL + 0x224));
 	con_str(" pas", "AUTH_AND_RESET...");
 	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
+	/* t28: do NOT read ZAP_REGION here - AUTH_AND_RESET reassigns it to the
+	 * secure VMID, so a CPU read now faults/hangs. */
 	con_hex2(" auth", "x0=", (uint32_t)rr, "intr=", scm_intr);
-	con_hex2(" pas", "auth=", (uint32_t)rr, "word0=", *(volatile uint32_t *)ZAP_REGION);
 	return rr == 0;
 }
 #endif
