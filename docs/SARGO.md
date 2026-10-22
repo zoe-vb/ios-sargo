@@ -175,6 +175,9 @@ pull-ups on, ABL left all four touch pins pulled down: IC unpowered (t08's ACK w
 t09 turns on PM660 GPIO 12 (ts_1p8 vio, PPID 0x0cb) over the SPMI arbiter v5 RW channel
 (0xc600000 + 0x10000*apid; EXT_WRITEL, MODE 0x40=1, OUT_SRC 0x44=0x80, EN 0x46=0x80): **touch data reads
 live** (user report). No GPI/SMMU needed: bit-banged I2C at ~50 kHz is enough for polling.
+XNU: patch 0087 (`bsd/dev/sweet_sargo_touch.c`, started from sweet_sdhc_init; SweetHID takes the panel
+size from the boot framebuffer). x19 (0087 kernel + x18 config): **touch works on the iOS lock screen**
+(2026-10-22).
 
 ## Stage plan
 
