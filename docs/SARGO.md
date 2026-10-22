@@ -177,7 +177,7 @@ t09 turns on PM660 GPIO 12 (ts_1p8 vio, PPID 0x0cb) over the SPMI arbiter v5 RW 
 live** (user report). No GPI/SMMU needed: bit-banged I2C at ~50 kHz is enough for polling.
 XNU: patch 0087 (`bsd/dev/sweet_sargo_touch.c`, started from sweet_sdhc_init; SweetHID takes the panel
 size from the boot framebuffer). x19 (0087 kernel + x18 config): **touch works on the iOS lock screen**
-(2026-10-22).
+(2026-10-22), and swipe-up from the bottom edge unlocks to the home screen.
 
 ## Stage plan
 

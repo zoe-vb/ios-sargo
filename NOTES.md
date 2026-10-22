@@ -20,7 +20,8 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   0087 CI kernel downloaded -> `xnu-kernel-0087/` (SHA256SUMS OK); **x19** = `shim/out/sargo/shim-boot-x19.img`
   (0087 kernel + sargo-x13.adt + x18 cmdline). Boot sent 2026-10-22 ~13:03.
 - **MILESTONE 2026-10-22 ~13:10: TOUCH WORKS IN iOS ON SARGO (x19)** (owner report: "touch works on the lock
-  screen"). Not yet checked: swipe-up/home gesture edge flags, multi-touch, latency/CPU cost of the bit-bang
+  screen"). **Swipe-up unlocks to the HOME SCREEN** (owner report, same boot). Not yet checked: multi-touch,
+  latency/CPU cost of the bit-bang
   (~2 ms per read with cpus=1). Next candidates: keys (PM660 PON + PM660L GPIO 7), stall root cause, SMP.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
