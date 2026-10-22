@@ -199,7 +199,12 @@ report off (probably need GPU activity); GPU CC CX/GX GDSC 0x00222001 (collapsed
 (enabled, USFCFG = unmatched fault), IDR0 0x48016605 (5 SMRs), IDR1 0x20008005 (4K pages, 8 global
 pages, 5 CBs); all SMRs invalid, S2CR 0x000200ff (fault): nothing routed, Linux programs it itself.
 GMU: CM3 in reset (sysreset 1), init result 0, no firmware. **t11** (`GPU=gmu`, 58061a3): GMU boot (see
-shim/gpu.c header).
+shim/gpu.c header). **t11 result (IMG_0062)**: GMU firmware 0x8000 bytes, word0 0x00043f80 (CM3
+stack pointer); GMU RCG cfg 0x602 (200 MHz) updated; CB 1 CBAR 0x10000, SCTLR 0x67, TTBR0, TCR 0x800020 all
+read back, S2CR0 = 1 stuck, **but SMR0 0x80010004 (streams 4+5, mask 1) read back 0**: dropped, probe
+stopped before the GMU reset release. (ios-sailfish found the same kind of firmware filtering: only an
+exact stream-0 SMR was accepted on its GPU SMMU.) **t12** (f07e925): exact SMRs, stream 5 then 4, slots
+0/1/4/3/2, then the GMU boot if stream 5 sticks.
 
 ## Stage plan
 
