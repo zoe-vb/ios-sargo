@@ -55,11 +55,12 @@ sub('(uintptr_t)pt_l3 | 3u', 'pt_l3_pa | 3u')
 body = body.replace('(uint32_t)(uintptr_t)pt_l1', '(uint32_t)pt_l1_pa') \
            .replace('(uint64_t)(uintptr_t)pt_l1', 'pt_l1_pa')
 body = body.replace('(uint32_t)(uintptr_t)zap_meta', '(uint32_t)zap_meta_pa')
-sub('(uintptr_t)zap_meta', 'zap_meta_pa')
+body = body.replace('(uintptr_t)zap_meta', 'zap_meta_pa')  # may be 0 (t23: INIT_IMAGE uses ZAP_REGION)
 # CPU views of physical memory outside the DMA block
 sub('const uint8_t *db = (const uint8_t *)(uintptr_t)base;', 'const uint8_t *db = (const uint8_t *)io_va_map(base, size);')
 body = body.replace('*(volatile uint32_t *)ZAP_REGION', '*(volatile uint32_t *)io_va(ZAP_REGION)')
 sub('volatile uint32_t *dst = (volatile uint32_t *)ZAP_REGION;', 'volatile uint32_t *dst = (volatile uint32_t *)io_va(ZAP_REGION);')
+sub('volatile uint32_t *reg = (volatile uint32_t *)ZAP_REGION;', 'volatile uint32_t *reg = (volatile uint32_t *)io_va(ZAP_REGION);')
 # XNU schedules with the EL1 timers
 sub('	__asm__ volatile("msr cntp_ctl_el0, %0; msr cntv_ctl_el0, %0; isb" : : "r"((uint64_t)2));	/* off, masked */\n',
     '	/* (the shim also switched the EL1 timers off here; XNU needs them) */\n')

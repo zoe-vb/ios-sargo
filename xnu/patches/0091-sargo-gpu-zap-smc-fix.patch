@@ -1,0 +1,350 @@
+--- a/bsd/dev/sweet_sargo_gpu.c
++++ b/bsd/dev/sweet_sargo_gpu.c
+@@ -314,6 +314,11 @@
+ #define GPU_IOVA	(GMU_IOVA + 0x100000)	/* same L3 table, entries 256.. */
+ #define GPU_RING	0x8000			/* offsets in gpu_mem */
+ #define GPU_TARGET	0x9000
++#ifdef GPU_BLIT
++#define BLIT_W		64u
++#define BLIT_H		64u
++#define BLIT_TARGET	0xa000u		/* in gpu_mem: 64x64 BGRA */
++#endif
+ #endif
+ #ifdef GPU_ZAP
+ /* stock (Android 9) DT gpu_region; mainline sdm670-google-common has gpu@97a15000 (ZAPREGION=mainline) */
+@@ -323,6 +328,9 @@
+ #define ZAP_REGION	0x95c15000UL
+ #endif
+ #define ZAP_PAS_ID	13
++/* t22: secure context bank page table + hyp_assign / SCM argument buffers */
++static uint8_t sec_mem[0x3000] __attribute__((aligned(4096)));
++#define SEC_CB		1
+ #endif
+ 
+ static int gmu_clock_200(void)
+@@ -679,6 +687,11 @@
+ 	    (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1u;
+ }
+ 
++static uint32_t __attribute__((unused)) pkt4(unsigned reg, unsigned cnt)
++{
++	return 0x40000000u | (cnt & 0x7f) | pm4_parity(cnt) << 7 | (reg & 0x3ffff) << 8 | pm4_parity(reg) << 27;
++}
++
+ static uint32_t pkt7(unsigned op, unsigned cnt)
+ {
+ 	return 0x70000000u | cnt | pm4_parity(cnt) << 15 | (op & 0x7fu) << 16 | pm4_parity(op) << 23;
+@@ -686,23 +699,37 @@
+ 
+ #ifdef GPU_ZAP
+ /* qcom_scm SMCCC convention: SIP, SMC64, standard call; x0 status, x1 result */
++/*
++ * t26: mainline __scm_smc_do_quirk passes x7 = args[7] = 0 and x6 = the saved
++ * a6 (0 first, returned-a6 on resume). We previously left x7 as a clobber
++ * (garbage) - SMCCC requires unused args 0. Also count INTERRUPTED spins:
++ * mainline services IRQs between resumes; if TZ keeps returning INTERRUPTED
++ * because a pending interrupt is never handled, a bare masked-IRQ caller
++ * spins forever (looks like a hang). Cap and report instead.
++ */
++static uint32_t scm_intr;	/* INTERRUPTED spins of the last scm() call */
+ static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t *res)
+ {
+-	register uint64_t x0 __asm__("x0") = 0x42000000u | svc_cmd;
+-	register uint64_t x1 __asm__("x1") = arginfo;
+-	register uint64_t x2 __asm__("x2") = a0;
+-	register uint64_t x3 __asm__("x3") = a1;
+-	register uint64_t x4 __asm__("x4") = a2;
+-	register uint64_t x5 __asm__("x5") = 0;
+-	register uint64_t x6 __asm__("x6") = 0;
++	register uint64_t x0 __asm__("x0");
++	register uint64_t x1 __asm__("x1");
++	register uint64_t x2 __asm__("x2");
++	register uint64_t x3 __asm__("x3");
++	register uint64_t x4 __asm__("x4");
++	register uint64_t x5 __asm__("x5");
++	register uint64_t x6 __asm__("x6");
++	register uint64_t x7 __asm__("x7");
++	scm_intr = 0;
+ 	for (unsigned tries = 0; tries < 20; tries++) {
+ 		uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
+ 		do {	/* QCOM_SCM_INTERRUPTED (1): resume with x0 = 1, x6 as returned */
+-			x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = 0; x6 = sess;
+-			__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
+-			    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++			x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = 0; x6 = sess; x7 = 0;
++			__asm__ volatile("smc #0"
++			    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
++			    : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+ 			fn = 1;
+ 			sess = x6;
++			if (x0 == 1 && ++scm_intr >= 4000000u)	/* ~ seconds of spinning: give up */
++				break;
+ 		} while (x0 == 1);
+ 		if ((int64_t)x0 != -12)		/* QCOM_SCM_V2_EBUSY */
+ 			break;
+@@ -767,6 +794,85 @@
+ 	return st;
+ }
+ 
++/* scm() with a fourth argument in x5 (downstream scm_call2: args[3], or the extra-args buffer) */
++static int64_t scm5(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2,
++    uint64_t a3, uint64_t *res)
++{
++	register uint64_t x0 __asm__("x0"), x1 __asm__("x1"), x2 __asm__("x2"), x3 __asm__("x3");
++	register uint64_t x4 __asm__("x4"), x5 __asm__("x5"), x6 __asm__("x6"), x7 __asm__("x7");
++	uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
++	do {
++		x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = a3; x6 = sess; x7 = 0;
++		__asm__ volatile("smc #0"
++		    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
++		    : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++		fn = 1;
++		sess = x6;
++	} while (x0 == 1);
++	if (res)
++		*res = x1;
++	return (int64_t)x0;
++}
++
++/*
++ * t22: downstream KGSL (android-msm-bonito-4.9-pie-qpr3-b, the PQ3B kernel)
++ * only loads the zap when the IOMMU has a secure context (mmu.secured), and
++ * before that: kgsl_iommu _init_global_pt -> program_smmu_aperture(user cb,
++ * CP_APERTURE_REG 0) = TZ MP 0x1b; _init_secure_pt -> gfx3d_secure (SID 2)
++ * on its own bank with DOMAIN_ATTR_SECURE_VMID = VMID_CP_PIXEL, whose page
++ * tables arm-smmu hyp_assigns from HLOS to {HLOS RW, CP_PIXEL R}
++ * (arm_smmu_assign_table, MEM_PROT_ASSIGN = MP 0x16). Do both.
++ */
++static void secure_context(void)
++{
++	uint64_t x1 = 0xdead;
++	int64_t ra = scm5(0x0c1b, 4, 0xffff0000u | (0u << 8) | GPU_CB, 0xffffffffu, 0xffffffffu,
++	    0xffffffffu, &x1);
++	con_hex2(" aperture", "x0=", (uint32_t)ra, "x1=", (uint32_t)x1);
++
++	for (unsigned i = 0; i < sizeof(sec_mem); i++)
++		sec_mem[i] = 0;
++	uint64_t l1 = (uintptr_t)sec_mem;		/* empty table: every secure access faults */
++	uintptr_t cb = GSMMU_CB(SEC_CB);
++	wr(cb + 0x00, 0);
++	wr(GSMMU_GR1 + 0x800 + 4 * SEC_CB, 1u);	/* AArch64 */
++	wr(GSMMU_GR1 + 4 * SEC_CB, 1u << 16);		/* S1 translate, S2 bypass */
++	wr(cb + 0x10, 2u);
++	wr(cb + 0x20, (uint32_t)l1);
++	wr(cb + 0x24, (uint32_t)(l1 >> 32));
++	wr(cb + 0x30, 32u | (1u << 23));
++	wr(cb + 0x38, 0x44u);
++	wr(cb + 0x3c, 0);
++	wr(cb + 0x58, 0xffffffffu);
++	wr(cb + 0x618, 0);
++	wr(cb + 0x7f0, 0);
++	wait_bits(cb + 0x7f4, 1u, 0);
++	wr(cb + 0x00, 0x67u);
++	wr(GSMMU + 0xc00 + 4 * 3, SEC_CB);		/* SMR 3: SID 2 (gfx3d_secure), exact */
++	wr(GSMMU + 0x800 + 4 * 3, (1u << 31) | 2u);
++	con_hex2(" sec sid2", "smr3=", rd(GSMMU + 0x80c), "s2cr3=", rd(GSMMU + 0xc0c));
++
++	/* hyp_assign_phys(l1, 4K, {HLOS} -> {HLOS RW, CP_PIXEL R}) */
++	uint64_t *info = (uint64_t *)(sec_mem + 0x1000);	/* struct mem_prot_info */
++	uint32_t *src = (uint32_t *)(sec_mem + 0x1100);
++	uint32_t *dst = (uint32_t *)(sec_mem + 0x1200);	/* 2 x struct dest_vm_and_perm_info (24 B) */
++	uint64_t *ext = (uint64_t *)(sec_mem + 0x2000);	/* args[3..9] */
++	info[0] = l1;
++	info[1] = 0x1000;
++	src[0] = 3;					/* VMID_HLOS */
++	dst[0] = 3;   dst[1] = 4 | 2;			/* HLOS: read, write */
++	dst[6] = 0xa; dst[7] = 4;			/* VMID_CP_PIXEL: read */
++	ext[0] = 4;					/* source list size */
++	ext[1] = (uintptr_t)dst;
++	ext[2] = 48;					/* dest list size */
++	ext[3] = 0;
++	__asm__ volatile("dsb sy" ::: "memory");
++	x1 = 0xdead;
++	int64_t rh = scm5(0x0c16, 7 | (1u << 4) | (1u << 8) | (1u << 12),	/* RO, VAL, RO, VAL, RO, VAL, VAL */
++	    (uintptr_t)info, 16, (uintptr_t)src, (uintptr_t)ext, &x1);
++	con_hex2(" hypassign", "x0=", (uint32_t)rh, "x1=", (uint32_t)x1);
++}
++
+ /* Linux qcom_mdt_load + qcom_scm_pas_auth_and_reset for the a615 zap shader */
+ static int zap_load(void)
+ {
+@@ -781,6 +887,20 @@
+ 	}
+ 	for (uint32_t i = 0; i < mdt_size; i++)
+ 		zap_meta[i] = zap_mdt[i];
++	/*
++	 * t23: downstream pil_boot passes init_image the region start as the
++	 * metadata address - pil_init_image_trusted maps it and copies the .mdt
++	 * into the carveout itself (mdt 0x1a1c fits the 8 KiB region); the code
++	 * segment is copied over it after MEM_SETUP. Do the same.
++	 */
++	volatile uint32_t *reg = (volatile uint32_t *)io_va(ZAP_REGION);
++	for (uint32_t i = 0; i < 0x2000 / 4; i++) {
++		uint32_t w = 0;
++		for (unsigned k = 0; k < 4; k++)
++			if (i * 4 + k < mdt_size)
++				w |= (uint32_t)zap_mdt[i * 4 + k] << (8 * k);
++		reg[i] = w;
++	}
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	/*
+ 	 * t15 (IMG_0068) hung after INIT_IMAGE/MEM_SETUP returned 0, with no
+@@ -793,7 +913,7 @@
+ 	 * t15..t17b only checked x0. Show both and stop on either.
+ 	 */
+ 	uint64_t ri1 = 0xdead, rm1 = 0xdead;
+-	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, zap_meta_pa, 0, &ri1);	/* VAL, RW */
++	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, ZAP_REGION, 0, &ri1);	/* VAL, RW: the .mdt in the carveout */
+ 	con_hex2(" init", "x0=", (uint32_t)ri, "x1=", (uint32_t)ri1);
+ 	if (ri || ri1) {
+ 		con_str("ZAP", "INIT_IMAGE refused (x1): auth not attempted");
+@@ -826,6 +946,14 @@
+ 	CPDETAIL(con_hex2(" gx", "sptprac=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)), "trust=", rd(GPU + 0xf400 * 4)));
+ 	rpmh_bcm_vote("CE0", (1u << 30) | (1u << 29) | (1u << 14) | 1u);	/* commit, valid, x=1, y=1 */
+ 	/*
++	 * t24: downstream scm_pas_enable_bw votes MASTER_CRYPTO_CORE0 -> EBI;
++	 * mainline icc sdm670 path: qxm_crypto [CE0] -> qnm_aggre2_noc [SN10]
++	 * -> qns_memnoc_sf [SN0] -> qns_llcc [SH0] -> ebi [MC0, ACV]. The CPU
++	 * keeps SH0/MC0/ACV up; vote the aggre2/system NoC hops too.
++	 */
++	rpmh_bcm_vote("SN10", (1u << 30) | (1u << 29) | (1u << 14) | 1u);
++	rpmh_bcm_vote("SN0", (1u << 30) | (1u << 29) | (1u << 14) | 1u);
++	/*
+ 	 * t21: Linux makes this call with IRQs enabled and services them; the
+ 	 * shim runs masked with no handler, and t17+ enabled the GPU's
+ 	 * interrupts. Show what is pending, then quiesce every source the shim
+@@ -835,9 +963,9 @@
+ 	__asm__ volatile("mrs %0, isr_el1" : "=r"(isr));
+ 	__asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(cntp));
+ 	__asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(cntv));
+-	con_hex2(" irq", "isr=", (uint32_t)isr, "cntp/v=", (uint32_t)(cntp << 16 | cntv));
+-	con_hex2(" gicr0", "pend=", rd(0x17a60000UL + 0x10200), "en=", rd(0x17a60000UL + 0x10100));
+-	con_hex2(" spi288", "pend=", rd(0x17a00000UL + 0x224), "en=", rd(0x17a00000UL + 0x124));
++	CPDETAIL(con_hex2(" irq", "isr=", (uint32_t)isr, "cntp/v=", (uint32_t)(cntp << 16 | cntv)));
++	CPDETAIL(con_hex2(" gicr0", "pend=", rd(0x17a60000UL + 0x10200), "en=", rd(0x17a60000UL + 0x10100)));
++	CPDETAIL(con_hex2(" spi288", "pend=", rd(0x17a00000UL + 0x224), "en=", rd(0x17a00000UL + 0x124)));
+ 	/* (the shim also switched the EL1 timers off here; XNU needs them) */
+ 	gpu_w(0x0038, 0);				/* RBBM_INT_0_MASK */
+ 	wr(GMU_REG(0x23b06), 0xffffffffu);		/* GMU_AO_HOST_INTERRUPT_MASK */
+@@ -851,7 +979,9 @@
+ 	con_hex2(" quiet", "isr=", (uint32_t)isr, "spi pend=", rd(0x17a00000UL + 0x224));
+ 	con_str(" pas", "AUTH_AND_RESET...");
+ 	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
+-	con_hex2(" pas", "auth=", (uint32_t)rr, "word0=", *(volatile uint32_t *)io_va(ZAP_REGION));
++	/* t28: do NOT read ZAP_REGION here - AUTH_AND_RESET reassigns it to the
++	 * secure VMID, so a CPU read now faults/hangs. */
++	con_hex2(" auth", "x0=", (uint32_t)rr, "intr=", scm_intr);
+ 	return rr == 0;
+ }
+ #endif
+@@ -1058,14 +1188,13 @@
+ 	gpu_w(0x0802, (1u << 27) | (2u << 8) | 9u);	/* CP_RB_CNTL: no rptr update, 32 B blocks, 4 KiB */
+ #ifdef GPU_ZAP
+ 	/*
+-	 * t19: downstream KGSL (the driver this TZ shipped with) loads the zap
+-	 * in a6xx_microcode_load, after CP_SQE_INSTR_BASE and before the SQE is
+-	 * started; mainline does it after CP_ME_INIT. t15..t18 used mainline's
+-	 * order and AUTH_AND_RESET never returned. Use downstream's.
++	 * t26: auth works (x7=0). t19 loaded the zap before the SQE started and
++	 * the GPU hung on the first register access after AUTH_AND_RESET's reset.
++	 * Mainline order: set up the secure IOMMU context now, start the SQE and
++	 * CP_ME_INIT, then load the zap and push CP_SET_SECURE_MODE through the
++	 * already-running ring (no GPU-register poking across the reset).
+ 	 */
+-	int zap_ok = zap_load();
+-	if (!zap_ok)
+-		return;
++	secure_context();
+ #endif
+ 	gpu_w(0x0808, 1);				/* CP_SQE_CNTL: start the SQE */
+ 
+@@ -1109,9 +1238,89 @@
+ #else
+ 	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
+ #endif
++#ifdef GPU_BLIT
++	/*
++	 * t25 workaround: route the GPU secure stream (SID 2) to the same page
++	 * tables as SID 0 (GPU_CB) so render-backend writes in secure mode land
++	 * in normal memory, then a 2D solid fill with secure mode still on (no
++	 * zap). A6XX 2D registers from Mesa tu_clear_blit.cc r2d_*.
++	 */
++	if (got != 0xc0ffee15u)
++		return;
++	wr(GSMMU + 0xc00 + 4 * 3, GPU_CB);
++	wr(GSMMU + 0x800 + 4 * 3, (1u << 31) | 2u);
++	con_hex2("BLIT", "sid2 smr3=", rd(GSMMU + 0x80c), "s2cr3=", rd(GSMMU + 0xc0c));
++	volatile uint32_t *px = (volatile uint32_t *)(gpu_mem + BLIT_TARGET);
++	for (unsigned i = 0; i < BLIT_W * BLIT_H; i++)
++		px[i] = 0xdeadbeefu;
++	uint64_t ts_iova = GPU_IOVA + GPU_TARGET, dst = GPU_IOVA + BLIT_TARGET;
++	mem[GPU_TARGET / 4] = 0;
++	__asm__ volatile("dsb sy" ::: "memory");
++	gpu_w(0x8e07, 0x10000000u);			/* RB_CCU_CNTL */
++	uint32_t blt = (1u << 7) | (0x30u << 8) | (0xfu << 20);	/* solid, FMT6_8888_UNORM, mask */
++	ring[n++] = pkt7(0x65, 1); ring[n++] = (1u << 8) | 12u;	/* CP_SET_MARKER RM6_BLIT2DSCALE */
++	ring[n++] = pkt4(0x8c01, 1); ring[n++] = 0;		/* RB_A2D_PIXEL_CNTL */
++	ring[n++] = pkt4(0x8c00, 1); ring[n++] = blt;		/* RB_A2D_BLT_CNTL */
++	ring[n++] = pkt4(0x8400, 1); ring[n++] = blt;		/* GRAS_A2D_BLT_CNTL */
++	ring[n++] = pkt4(0x8c17, 4); ring[n++] = 0x30u;		/* DEST_BUFFER_INFO fmt, swap WZYX */
++	ring[n++] = (uint32_t)dst; ring[n++] = (uint32_t)(dst >> 32);
++	ring[n++] = (BLIT_W * 4u) >> 6;				/* PITCH shr 6 */
++	ring[n++] = pkt4(0xacc0, 1); ring[n++] = (0x30u << 3) | (0xfu << 12);	/* SP_A2D_OUTPUT_INFO */
++	ring[n++] = pkt4(0x8c2c, 4);				/* RB_A2D_CLEAR_COLOR */
++	ring[n++] = 0x11; ring[n++] = 0x22; ring[n++] = 0x33; ring[n++] = 0x44;
++	ring[n++] = pkt4(0x8405, 2);				/* GRAS_A2D_DEST_TL/BR */
++	ring[n++] = 0;
++	ring[n++] = (BLIT_W - 1u) | ((BLIT_H - 1u) << 16);
++	ring[n++] = pkt7(0x26, 0);				/* CP_WAIT_FOR_IDLE */
++	ring[n++] = pkt7(0x2c, 3);				/* CP_BLIT */
++	ring[n++] = 3u; ring[n++] = 0; ring[n++] = 0;		/* BLIT_OP_SCALE */
++	ring[n++] = pkt7(0x46, 4);				/* CP_EVENT_WRITE CACHE_FLUSH_TS */
++	ring[n++] = 0x04u | (1u << 30);
++	ring[n++] = (uint32_t)ts_iova; ring[n++] = (uint32_t)(ts_iova >> 32);
++	ring[n++] = 0xb1170000u;
++	ring[n++] = pkt7(0x26, 0);				/* CP_WAIT_FOR_IDLE */
++	__asm__ volatile("dsb sy" ::: "memory");
++	gpu_w(0x0807, n);
++	for (ms = 0; ms < 300; ms++) {
++		rptr = gpu_r(0x0806);
++		if (rptr == n && mem[GPU_TARGET / 4] == 0xb1170000u)
++			break;
++		delay(1000);
++	}
++	con_hex2("BLIT", "rptr=", rptr, "wptr=", n);
++	con_hex2(" done", "ts=", mem[GPU_TARGET / 4], "rbbm=", gpu_r(RBBM_STATUS));
++	con_hex2(" fault", "cphw=", gpu_r(0x0821), "int0=", gpu_r(RBBM_INT_0_STATUS));
++	con_hex2(" cb", "fsr=", rd(GSMMU_CB(GPU_CB) + 0x58), "far=", rd(GSMMU_CB(GPU_CB) + 0x60));
++	con_hex2(" px", "[0]=", px[0], "[last]=", px[BLIT_W * BLIT_H - 1]);
++	con_str("BLIT", px[0] == 0x44332211u ? "GPU RENDERED IN SECURE MODE: pixels in memory" :
++	    px[0] == 0xdeadbeefu ? "nothing written (secure-mode block?)" : "unexpected pixel");
++	return;
++#endif
+ #ifdef GPU_ZAP
+ 	if (got != 0xc0ffee15u)
+ 		return;
++	if (!zap_load())				/* auth the zap on the running CP */
++		return;
++	/*
++	 * t28: AUTH_AND_RESET resets the GPU; GX (SPTPRAC) can collapse. GMU
++	 * regs (CX/AO) stay accessible - read the rail state before any GPU-core
++	 * MMIO (which would wedge the bus if GX is down), re-assert if needed.
++	 */
++	uint32_t sp = rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS));
++	con_hex2(" postauth", "sptprac=", sp, "cxbusy=", rd(GMU_REG(0x23b0c)));
++	if (sp & ((1u << 6) | (1u << 7))) {		/* GX_HM_GDSC_POWER_OFF | GX_HM_CLK_OFF */
++		gmu_oob(" reGPU", 16, 24);
++		wr(GMU_REG(GMU_GX_SPTPRAC_POWER_CONTROL), 0x778000);
++		int ok = 0;
++		for (unsigned i = 0; i < 20 && !ok; i++)
++			ok = wait_bits(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS), 0x38, 0x28);
++		sp = rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS));
++		con_hex2(" reGX", "ok=", ok, "sptprac=", sp);
++		if (sp & ((1u << 6) | (1u << 7))) {
++			con_str("ZAP", "GX stayed collapsed after auth; GPU core unreachable");
++			return;
++		}
++	}
+ 	unsigned start = n;
+ 	ring[n++] = pkt7(0x66, 1);			/* CP_SET_SECURE_MODE */
+ 	ring[n++] = 0;
