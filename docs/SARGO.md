@@ -245,7 +245,11 @@ UBWC, hang detect, INT mask, ...) and the zap load right after CP_ME_INIT + idle
 MEM_SETUP accepts it too (0), same hang. So neither the region nor our GPU programming is the cause. Not
 done like Android: nothing ran before us in this boot that Android's kernel runs (other PIL loads, QSEECOM,
 hypervisor memory assignment for the shim's own memory), we call from EL1 with MMU/caches off. TZ says
-PAS 13 unsupported (IS_SUPPORTED = 0) although INIT_IMAGE/MEM_SETUP succeed. Parked: continue in XNU.
+PAS 13 unsupported (IS_SUPPORTED = 0) although INIT_IMAGE/MEM_SETUP succeed. **t18 (5bbf219)**: x1 results of
+INIT_IMAGE and MEM_SETUP also 0 (owner report) - both fully accepted; auth hangs. **t19 (9f8f8ec)**: zap before the
+SQE starts (downstream KGSL a6xx_microcode_load order) - no change. Untested: whether the zap loads at all on this
+firmware (bootloader b4s4-0.1-5653622) under any OS other than its own Android; mainline sargo users typically run
+later firmware. Next idea: fastboot boot a mainline Linux (msm DRM + a615 zap) and read its log on the framebuffer.
 
 ## Stage plan
 
