@@ -179,6 +179,21 @@ XNU: patch 0087 (`bsd/dev/sweet_sargo_touch.c`, started from sweet_sdhc_init; Sw
 size from the boot framebuffer). x19 (0087 kernel + x18 config): **touch works on the iOS lock screen**
 (2026-10-22), and swipe-up from the bottom edge unlocks to the home screen.
 
+## GPU bring-up (2026-10-22)
+
+Reference: joranv1/ios-sailfish (Pixel 1, Adreno 530) runs CoreAnimation's GLES renderer on Mesa
+freedreno: kernel SweetGPU (power, SMMU, CP, zap, msm-style bo/submit user client) + `sweetgl.dylib`
+(freedreno + libdrm/msm emulation + EAGL shim, DYLD_INSERT into backboardd). Its own code has no
+license file (parent ios-sweet is MIT): read as reference, ask the author before copying.
+sargo differences: Adreno 615 (a6xx gen1, chip id 0x06010500) needs the GMU (Cortex-M3) to power GX;
+firmware a630_sqe.fw, a630_gmu.bin (raw ITCM image, legacy load), a615_zap.mdt/.b00-.b02, taken from
+factory image PD2A.190115.029 vendor.img into `research/sargo-gpu-fw/` (gitignored, SHA256SUMS there).
+Stock DT: GPU 0x5000000 (+0x40000), GMU 0x506a000 (+0x31000) and PDC 0xb200000, GPU CC 0x5090000
+(CX GDSC 0x106c, GX GDSC 0x100c, CX GMU CBCR 0x1098, CXO 0x109c, GMU RCG 0x1120), GPU SMMU
+`arm,smmu-kgsl@5040000` (qcom,smmu-v2): GPU SID 0 (user) / 2 (secure), GMU SIDs 4/5. GMU register
+offsets in a6xx_gmu.xml are dwords from the GPU base. **t10** (`GPU=1`, shim/gpu.c): GCC GPU clocks,
+CX GDSC on, GMU clocks, GPU SMMU routing dump, GMU CM3 state. Result pending.
+
 ## Stage plan
 
 1. **Shim stage 1** (`BOARD=sargo shim/build.sh`): boots via `fastboot boot`, draws on
