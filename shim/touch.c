@@ -344,6 +344,29 @@ static int gpi_init(void)
 	return 1;
 }
 
+/*
+ * Read-only look at apps_smmu (qcom,qsmmu-v500 = MMU-500 at 0x15000000, the
+ * SMMU in GPI's iommus = <&apps_smmu 0x6d6 0>; the eMMC node has no iommus).
+ * Stream match entries for GPI's SID: type 0 translate, 1 bypass, 2 fault.
+ */
+#define SMMU		0x15000000UL
+static void smmu_probe(unsigned sid)
+{
+	uint32_t scr0 = rd(SMMU), idr0 = rd(SMMU + 0x20);
+	con_hex2("SMMU", "scr0=", scr0, "idr0=", idr0);
+	unsigned n = idr0 & 0xff, hits = 0;
+	for (unsigned i = 0; i < n && i < 256; i++) {
+		uint32_t smr = rd(SMMU + 0x800 + 4 * i);
+		uint32_t id = smr & 0x7fff, mask = (smr >> 16) & 0x7fff;
+		if (!(smr & (1u << 31)) || ((id ^ sid) & ~mask & 0x7fff))
+			continue;
+		uint32_t s2cr = rd(SMMU + 0xc00 + 4 * i);
+		con_hex2(" smr", "v=", smr, "s2cr=", s2cr);
+		hits++;
+	}
+	con_hex2(" sid", "id=", sid, "matches=", hits);
+}
+
 static void put_tre(uint32_t *ring, unsigned *wp, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
 {
 	uint32_t *t = &ring[*wp * 4];
@@ -363,9 +386,22 @@ static void doorbell(unsigned k)
 }
 
 /* Wait for a transfer-completion event of channel chid; recycle consumed events. */
+static int trace = 1;	/* first transfer: one screen line per step */
+
 static int wait_event(unsigned chid)
 {
 	uint64_t end = ticks() + 100ull * TICKS_PER_MS;
+	if (trace) {
+		mdelay(20);
+		con_str("t rd", "reading EV RP...");
+		con_hex2("t EV", "rp=", rd(EV_CTX + CTX_RP_LO), "ctx=", rd(EV_CTX));
+		con_str("t rd", "reading CH state...");
+		con_hex2("t CH", "tx=", rd(CH_CTX(0)), "txrp=", rd(CH_CTX(0) + CTX_RP_LO));
+		con_hex2("t IRQ", "type=", rd(TYPE_IRQ), "glob=", rd(GLOB_IRQ_STTS));
+		con_hex2("t ERR", "log=", rd(ERROR_LOG), "gpii=", rd(GPII_IRQ_STTS));
+		con_hex2("t EVM", "w2=", ev_ring[2], "w3=", ev_ring[3]);
+		trace = 0;
+	}
 	while (ticks() < end) {
 		uintptr_t hw = rd(EV_CTX + CTX_RP_LO);
 		while (hw != pa(&ev_ring[ev_rp * 4])) {
@@ -402,7 +438,15 @@ static int gpi_write(const uint8_t *data, unsigned n, int stretch)
 	put_tre(tx_ring, &tx_wp, I2C_WR | (uint32_t)RMI_ADDR << 8 | (stretch ? 1u << 26 : 0), 0, n,
 	    TRE_GO << 16 | F_CHAIN);
 	put_tre(tx_ring, &tx_wp, (uint32_t)pa(xbuf), (uint32_t)(pa(xbuf) >> 32), n, TRE_DMA << 16 | F_IEOT);
+	if (trace) {
+		con_hex2("t TRE", "ring=", (uint32_t)pa(tx_ring), "wp=", tx_wp);
+		con_hex2("t TRE0", "w0=", tx_ring[0], "w3=", tx_ring[3]);
+		con_hex2("t TRE1", "w0=", tx_ring[4], "w3=", tx_ring[7]);
+		con_hex2("t TRE2", "w0=", tx_ring[8], "w3=", tx_ring[11]);
+	}
 	doorbell(0);
+	if (trace)
+		con_str("t DB", "TX doorbell written");
 	return wait_event(0);
 }
 
@@ -449,6 +493,7 @@ static void hexline(const char *label, const uint8_t *b, unsigned n)
 void test_touch(void)
 {
 	con_str("TOUCH", "RMI4 0x20 on i2c9 (SE @ A84000)");
+	smmu_probe(0x6d6);
 	if (!clocks() || !gpi_init())
 		return;
 	con_hex2("TLMM", "rst=", rd(GPIO_CFG(PIN_RESET)), "irq=", rd(GPIO_CFG(PIN_IRQ)));
