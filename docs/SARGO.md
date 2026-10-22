@@ -1,5 +1,9 @@
 # Port: Google Pixel 3a (`sargo`, SDM670)
 
+**Status 2026-10-22: iOS 16.7.16 (iPhone X userland) boots to the lock screen** from `userdata` on the
+eMMC (x18, see `docs/SARGO-INSTALL.md`). No touch, keys, USB networking yet; intermittent userland
+stalls without a periodic kernel thread (sampler) are not root-caused.
+
 Second board for the ios-sweet XNU + iOS 16 stack. The sweet (SM7150) and
 sargo (SDM670) share most Qualcomm blocks, so the plan is to reuse the shim,
 the XNU patches and the userland, and to make the board-specific parts selectable.

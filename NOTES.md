@@ -33,6 +33,12 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   `sdhcrw=1`, bounds-checked in `sd_write_sectors()`, `sdhcwtest=1` one-sector test at userdata+16 GiB+1 MiB
   (CI run 39684420050 started; never booted with sdhcrw). `tools/mkiosroot-mac.sh` (`87573d2`): hdiutil steps
   tested on small images; full run needs the iPhone10,3 16.7.x IPSW + MacPorts rsync 3, as root.
+- **MILESTONE 2026-10-22 ~00:55: iOS LOCK SCREEN ON SARGO (x18).** `shim/out/sargo/shim-boot-x18.img`: CI 0086 kernel
+  (`xnu-kernel-0086/`), `sargo-x13.adt`, cmdline `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress
+  rd=sdhcroot0 sdhcrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1
+  wdt=-1 sweetfb_noconsole=1 sweetfb_hz=30 sweetsample=cc_fips_test,keybagd,usermanagerd,dirs_cleaner,launchd_cache_loader,launchd`.
+  Open: boots without the sampler thread stalled (x14 x2, x16) -> suspected lost wakeup; touch (RMI4 i2c9), keys
+  (PM660 PON + PM660L GPIO7), USB networking, persistent console log on the eMMC, SMP (cpus>1) untested on sargo.
 - **MILESTONE 2026-10-22 ~00:25: Apple logo on sargo (x15).** Writable eMMC root (sdhcrw=1, root starts ro, iOS mount
   remounts rw), launchd past boot tasks, daemons exec, backboardd shows the logo. Earlier x14 boots stopped
   intermittently in dirs_cleaner / launchd_cache_loader (cause unknown; sampler 0086 ready for the next stall).

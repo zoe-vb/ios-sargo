@@ -201,6 +201,10 @@ Hypothesis (unproven, n=5): a lost wakeup / missed timer deadline that any perio
 hides. On sweet the console-log, touch, keys and USB threads (all started by sweet_ufs_init, none
 on sargo) would have hidden it. Confirming test later: a thread that only wakes every second.
 x18 = x17 + `sweetfb_noconsole=1 sweetfb_hz=30` (sampler kept on) to see the GUI.
+**x18 result (owner report, 2026-10-22 ~00:55): iOS LOCK SCREEN on the Pixel 3a.** Apple logo
+(drawn into the default surface, console still live), `SK[0] __nexus_register rapportd(82)`
+(Skywalk channel of a running daemon), then the lock screen. Image shim/out/sargo/shim-boot-x18.img
+= CI 0086 kernel + sargo-x13.adt + cmdline above, root = ios16-root-sargo.img in userdata.
 
 ### 4. Boot it, read-only first, then the write test **[WRITES only in 4b]**
 
