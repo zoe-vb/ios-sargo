@@ -23,6 +23,11 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   screen"). **Swipe-up unlocks to the HOME SCREEN** (owner report, same boot). Not yet checked: multi-touch,
   latency/CPU cost of the bit-bang
   (~2 ms per read with cpus=1). Next candidates: keys (PM660 PON + PM660L GPIO 7), stall root cause, SMP.
+- **KEYS (2026-10-22): patch 0088** (`60aa112`, pushed -> CI): keys polled every 20 ms in the sargo touch thread
+  (bsd/dev/sweet_sargo_touch.c): PM660 PON PPID 0x008 RT 0x10 bit0 power / bit1 vol-down; PM660L GPIO 7
+  PPID 0x2c6 RT bit0 low = vol-up, set to input + pull-up if not already (stock DT key_vol_up_default).
+  Power -> RequestPowerChange(0) only blanks pixels (0079), safe on this AMOLED. Next: download 0088 ->
+  `xnu-kernel-0088/`, x20 = x19 config, test power (sleep/wake), volume HUD.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
