@@ -266,6 +266,13 @@ HFI ok, GX on, GPU CORE REGISTERS ALIVE, INIT_IMAGE/MEM_SETUP x0=x1=0, CE0 vote 
 the whole system the same way** (cpus=1). So the bare shim state was not the cause either. Remaining unknown:
 what Android/Ubuntu Touch's downstream kernel has done before its first kgsl open (other PIL/TZ/QSEECOM/hyp
 calls) - needs ground truth from a kernel that loads the zap on this firmware.
+**Downstream source (kernel/msm android-msm-bonito-4.9-pie-qpr3-b = PQ3B):** a6xx_microcode_load loads the zap
+(subsystem_get "a615_zap", PIL pas 13) right after CP_SQE_INSTR_BASE, but **only if `device->mmu.secured`**, which
+is set when the KGSL IOMMU has its secure context (gfx3d_secure, SID 2) attached with DOMAIN_ATTR_SECURE_VMID =
+VMID_CP_PIXEL (hypervisor-assigned secure bank), and kgsl_iommu.c issues an extra TZ call SCM_SVC_MP
+CP_SMMU_APERTURE_ID before that. Neither is done by us - prime suspects for the AUTH_AND_RESET hang. Next: read
+kgsl_iommu.c ~1160-1300 and downstream arm-smmu secure-domain attach (hyp_assign of the secure CB's page tables)
+and reproduce them before the zap load.
 
 ## Stage plan
 
