@@ -57,6 +57,7 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   shim.** Fixes: x7=0 in the SMC (t26); mainline order zap-after-ME_INIT (t27); no CPU read of the zap carveout
   after auth (t28/t29). Next: fold all three into tools/gpu2xnu.py -> regenerate xnu 0089, boot GPU-in-iOS out
   of secure mode, then a real RB render + GLES/freedreno into CoreAnimation (ios-sailfish approach).**
+  **DONE: GPU out of secure mode IN iOS (x25, 0091 15d6ffc) - no hang.** XNU-only fixes vs shim: map 'reg'+sec_mem to physical (io_va/SEC_PA), mask IRQs around the SMC (ml_set_interrupts_enabled). Next: turn the probe into an IOKit SweetGPU service + msm-style user client, build Mesa freedreno + libdrm/msm shim + EAGL shim, inject into backboardd for CoreAnimation GLES (ios-sailfish approach).
   Plan: GLES via Mesa freedreno like
   joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and

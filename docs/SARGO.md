@@ -308,6 +308,7 @@ CP_ME_INIT, THEN zap_load, THEN CP_SET_SECURE_MODE via the running ring (t27); (
 after AUTH_AND_RESET - it is reassigned to the secure VMID and the read faults (t28/t29). The GPU authenticates
 the a615_zap, CP_SET_SECURE_MODE 0 leaves secure mode, and a subsequent CP_MEM_WRITE lands in normal memory.
 The Adreno 615 is now fully usable from the bare shim. Build: `BOARD=sargo LLVM=1 GPU=zap GPUFW=phone shim/build.sh`.
+**GPU OUT OF SECURE MODE IN iOS (x25, kernel patch 0091 15d6ffc):** no hang - the Adreno 615 leaves secure mode inside XNU too. Three fixes folded via gpu2xnu.py beyond 0089/0090: x7=0 in the SMC (t26); mainline order zap-after-ME_INIT (t27); no CPU read of the zap carveout after auth (t29); plus two XNU-only physical-address fixes the shim (MMU off) didn't need - map the zap metadata 'reg' pointer and sec_mem (secure CB page table + hyp_assign buffers) to physical via io_va / SEC_PA, and mask IRQs around the PAS SMC loop (ml_set_interrupts_enabled) so TZ doesn't spin on INTERRUPTED in a live kernel. x25 cmdline = x18 + sargogpu=1, firmware via mkpayload --blob from research/sargo-gpu-fw-phone/.
 Next: fold x7=0 + the reorder + the no-read into tools/gpu2xnu.py and regenerate xnu patch 0089, then a real
 render (RB 2D fill, now that secure mode is off) and wiring the GPU into CoreAnimation via GLES (freedreno),
 as ios-sailfish does.
