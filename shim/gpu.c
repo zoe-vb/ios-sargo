@@ -1230,6 +1230,26 @@ static void cp_test(void)
 		return;
 	if (!zap_load())				/* auth the zap on the running CP */
 		return;
+	/*
+	 * t28: AUTH_AND_RESET resets the GPU; GX (SPTPRAC) can collapse. GMU
+	 * regs (CX/AO) stay accessible - read the rail state before any GPU-core
+	 * MMIO (which would wedge the bus if GX is down), re-assert if needed.
+	 */
+	uint32_t sp = rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS));
+	con_hex2(" postauth", "sptprac=", sp, "cxbusy=", rd(GMU_REG(0x23b0c)));
+	if (sp & ((1u << 6) | (1u << 7))) {		/* GX_HM_GDSC_POWER_OFF | GX_HM_CLK_OFF */
+		gmu_oob(" reGPU", 16, 24);
+		wr(GMU_REG(GMU_GX_SPTPRAC_POWER_CONTROL), 0x778000);
+		int ok = 0;
+		for (unsigned i = 0; i < 20 && !ok; i++)
+			ok = wait_bits(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS), 0x38, 0x28);
+		sp = rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS));
+		con_hex2(" reGX", "ok=", ok, "sptprac=", sp);
+		if (sp & ((1u << 6) | (1u << 7))) {
+			con_str("ZAP", "GX stayed collapsed after auth; GPU core unreachable");
+			return;
+		}
+	}
 	unsigned start = n;
 	ring[n++] = pkt7(0x66, 1);			/* CP_SET_SECURE_MODE */
 	ring[n++] = 0;
