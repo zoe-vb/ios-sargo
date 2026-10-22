@@ -3,6 +3,13 @@
 ## Second board: Pixel 3a (sargo, SDM670) - started 2026-10-21
 
 Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked Pixel 3a for testing.
+- **TOUCH (2026-10-22, active)**: GPI DMA path (t02..t07) halts the SoC at the first doorbell; t07 froze
+  until manual fastboot. Switched to bit-banged I2C on gpio6/7 (`TOUCH=bb`). **t08 (photo IMG_0057)**: SDA/SCL
+  read 0 with TLMM pull-ups on; ABL left gpio6/7/99/125 cfg=1 (pulled down) -> touch IC unpowered; t08's
+  PAGE0 "ACK" was SDA stuck low (fake). **t09** (`498f38a`, `shim/out/sargo/shim-boot-t09.img`): first PMIC
+  write - PM660 GPIO 12 (PPID 0x0cb, ts_1p8 vio) to output high via SPMI arb v5 RW channel (0xc600000 +
+  0x10000*apid), guarded by TYPE=0x10 + apps ownership; refuses to probe while SDA/SCL low. **NOT BOOTED YET**
+  (phone was not in fastboot). If lines stay low: the panel 3.3 V (vreg_l6b, RPMh) may also feed touch.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
