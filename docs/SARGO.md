@@ -232,7 +232,13 @@ hang, manual fastboot). Not the cause: CB choice (t15c: GPU CB 0, GMU CB 3, CBs 
 INTERRUPTED resume. Lead: since t14 the GMU **crashes** after the OOB GPU_SET request (GMU2HOST_INTR_INFO
 0x00800000 = bit 23 CM3_FAULT, no ack; t13 - much slower console output between steps - got the ack 0x01000000).
 Linux sends HFI v1 GMU_INIT, FW_VERSION, PERF_TABLE, BW_TABLE before GPU_SET; we send none. t15d (3d6efd0):
-50 ms pacing + GMU state before GPU_SET (result pending).
+50 ms pacing + GMU state before GPU_SET. **t15d (IMG_0071)**: GMU2HOST clean (0) right before OOB GPU_SET, CM3_FAULT
+right after: the request itself crashes the GMU; pacing irrelevant. **t15e (967f825, IMG_0072)**: HFI v1 setup
+(GMU_INIT debug buffer + cold boot, FW_VERSION 1.10, PERF_TABLE off + 180 MHz MIN_SVS gx vote 0x00300302 /
+GMU off + 200 MHz, BW_TABLE = Linux a6xx fixed table, TEST) all answered 0 -> **OOB GPU_SET acked, no CM3_FAULT**
+(GMU fixed); AUTH_AND_RESET still hangs. **t15f (af302d4, IMG_0073)**: RPMh CE0 BCM vote (cmd-db addr 0x500a0,
+data 0x60004001) via apps RSC DRV2 ACTIVE TCS completed (cmd status 0x10101); AUTH_AND_RESET still hangs.
+Open: TZ says PAS 13 unsupported; no visible reason for the hang yet.
 
 ## Stage plan
 
