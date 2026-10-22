@@ -367,6 +367,48 @@ static void smmu_probe(unsigned sid)
 	con_hex2(" sid", "id=", sid, "matches=", hits);
 }
 
+/*
+ * t03: sCR0 0x00200406 (enabled, USFCFG: unmatched streams fault) and no
+ * stream match entry for 0x6d6, so GSI's first TRE fetch faulted and the CPU's
+ * doorbell write never completed. Install one, as Linux's SMMU driver would:
+ * S2CR bypass; if the hypervisor turns bypass into fault (Linux arm-smmu-qcom
+ * "bypass quirk"), point the stream at the last context bank configured as
+ * S1-translate/S2-bypass with SCTLR.M = 0, i.e. untranslated.
+ */
+static int smmu_bypass(unsigned sid)
+{
+	uint32_t idr0 = rd(SMMU + 0x20), idr1 = rd(SMMU + 0x24);
+	unsigned n = idr0 & 0xff, slot = n;
+	con_hex2("SMMU", "idr1=", idr1, "gfsr=", rd(SMMU + 0x48));
+	for (unsigned i = n; i-- > 0;)
+		if (!(rd(SMMU + 0x800 + 4 * i) & (1u << 31))) {
+			slot = i;
+			break;
+		}
+	if (slot == n) {
+		con_str("SMMU", "no free stream match entry");
+		return 0;
+	}
+	wr(SMMU + 0xc00 + 4 * slot, 1u << 16);			/* S2CR: bypass */
+	wr(SMMU + 0x800 + 4 * slot, 1u << 31 | (sid & 0x7fff));	/* SMR: valid, exact id */
+	uint32_t s2cr = rd(SMMU + 0xc00 + 4 * slot);
+	con_hex2(" slot", "n=", slot, "s2cr=", s2cr);
+	con_hex2(" smr", "v=", rd(SMMU + 0x800 + 4 * slot), 0, 0);
+	if (((s2cr >> 16) & 3) == 1)
+		return 1;
+	/* bypass quirk: last context bank, S1 translate / S2 bypass, translation off */
+	unsigned pgsize = (idr1 >> 31) ? 0x10000 : 0x1000;
+	unsigned npage = 1u << (((idr1 >> 28) & 7) + 1);
+	unsigned cb = (idr1 & 0xff) - 1;
+	uintptr_t cbb = SMMU + (uintptr_t)npage * pgsize + (uintptr_t)cb * pgsize;
+	con_hex2(" cb", "n=", cb, "cbar=", rd(SMMU + pgsize + 4 * cb));
+	wr(SMMU + pgsize + 4 * cb, 1u << 16);			/* GR1 CBAR: S1 trans, S2 bypass */
+	wr(cbb + 0x0, 0);					/* CB SCTLR: M = 0 */
+	wr(SMMU + 0xc00 + 4 * slot, 0u << 16 | cb);		/* S2CR: translate via that CB */
+	con_hex2(" cb", "cbar=", rd(SMMU + pgsize + 4 * cb), "s2cr=", rd(SMMU + 0xc00 + 4 * slot));
+	return 1;
+}
+
 static void put_tre(uint32_t *ring, unsigned *wp, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
 {
 	uint32_t *t = &ring[*wp * 4];
@@ -493,6 +535,9 @@ static void hexline(const char *label, const uint8_t *b, unsigned n)
 void test_touch(void)
 {
 	con_str("TOUCH", "RMI4 0x20 on i2c9 (SE @ A84000)");
+	smmu_probe(0x6d6);
+	if (!smmu_bypass(0x6d6))
+		return;
 	smmu_probe(0x6d6);
 	if (!clocks() || !gpi_init())
 		return;
