@@ -28,6 +28,8 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   PPID 0x2c6 RT bit0 low = vol-up, set to input + pull-up if not already (stock DT key_vol_up_default).
   Power -> RequestPowerChange(0) only blanks pixels (0079), safe on this AMOLED. Next: download 0088 ->
   `xnu-kernel-0088/`, x20 = x19 config, test power (sleep/wake), volume HUD.
+  **x20 (`shim/out/sargo/shim-boot-x20.img`, 0088 CI kernel): owner reports all buttons are logged by XNU**
+  (2026-10-22). iOS-side effects (volume HUD, power sleep/wake) not reported. Owner then switched priority to the GPU.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
