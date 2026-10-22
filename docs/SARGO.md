@@ -259,6 +259,13 @@ enabled), SPIs 288-319 none pending/enabled; after quiescing still nothing pendi
 region address, our GPU programming/order (mainline and downstream), x1 results, GMU fault, CE0 bandwidth, CB
 choice, interrupts, zap signature. Remaining difference: the shim's bare CPU state (EL1, MMU and caches off, one
 CPU) under the QHEE hypervisor vs. a kernel.
+**In XNU (patch 0089/0090, `tools/gpu2xnu.py`):** x21 panicked 'cannot map 0x5000840' (16-slot per-page map
+table full at RBBM_STATUS - i.e. GMU boot, HFI and GX power had run inside XNU); 0090 premaps the blocks.
+**x22 (IMG_0076)**: the full sequence runs inside iOS with MMU/caches on and interrupts serviced - GMU running,
+HFI ok, GX on, GPU CORE REGISTERS ALIVE, INIT_IMAGE/MEM_SETUP x0=x1=0, CE0 vote ok - and **AUTH_AND_RESET hangs
+the whole system the same way** (cpus=1). So the bare shim state was not the cause either. Remaining unknown:
+what Android/Ubuntu Touch's downstream kernel has done before its first kgsl open (other PIL/TZ/QSEECOM/hyp
+calls) - needs ground truth from a kernel that loads the zap on this firmware.
 
 ## Stage plan
 
