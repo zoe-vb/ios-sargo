@@ -423,6 +423,10 @@ static void __attribute__((noreturn)) board_bringup(uintptr_t dtb)
 #ifdef BRINGUP_TOUCH
 	stage = "touch";
 	test_touch();
+	/* touch probe: quick reset, so its timing shows whether the CPU survived */
+	con_str("DONE", "touch probe finished; reset in ~30 s");
+	delay_ms(10000);
+	reset(20);
 #else
 	stage = "emmc";
 	test_emmc();

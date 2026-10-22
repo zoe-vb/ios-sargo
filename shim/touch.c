@@ -375,6 +375,8 @@ static void smmu_probe(unsigned sid)
  * "bypass quirk"), point the stream at the last context bank configured as
  * S1-translate/S2-bypass with SCTLR.M = 0, i.e. untranslated.
  */
+static uintptr_t smmu_cb_base;		/* context bank used for 0x6d6, 0 = plain bypass */
+
 static int smmu_bypass(unsigned sid)
 {
 	uint32_t idr0 = rd(SMMU + 0x20), idr1 = rd(SMMU + 0x24);
@@ -405,6 +407,7 @@ static int smmu_bypass(unsigned sid)
 	wr(SMMU + pgsize + 4 * cb, 1u << 16);			/* GR1 CBAR: S1 trans, S2 bypass */
 	wr(cbb + 0x0, 0);					/* CB SCTLR: M = 0 */
 	wr(SMMU + 0xc00 + 4 * slot, 0u << 16 | cb);		/* S2CR: translate via that CB */
+	smmu_cb_base = cbb;
 	con_hex2(" cb", "cbar=", rd(SMMU + pgsize + 4 * cb), "s2cr=", rd(SMMU + 0xc00 + 4 * slot));
 	return 1;
 }
@@ -487,8 +490,27 @@ static int gpi_write(const uint8_t *data, unsigned n, int stretch)
 		con_hex2("t TRE2", "w0=", tx_ring[8], "w3=", tx_ring[11]);
 	}
 	doorbell(0);
-	if (trace)
-		con_str("t DB", "TX doorbell written");
+	if (trace) {
+		/*
+		 * t04 stopped while drawing the next line: capture the fault state
+		 * first, without touching the framebuffer, then print it all.
+		 */
+		mdelay(500);
+		uint32_t gfsr = rd(SMMU + 0x48), syn0 = rd(SMMU + 0x50), syn1 = rd(SMMU + 0x54);
+		uint32_t syn2 = rd(SMMU + 0x58);
+		uint32_t fsr = smmu_cb_base ? rd(smmu_cb_base + 0x58) : 0;
+		uint32_t far = smmu_cb_base ? rd(smmu_cb_base + 0x60) : 0;
+		uint32_t fsyn = smmu_cb_base ? rd(smmu_cb_base + 0x68) : 0;
+		uint32_t evrp = rd(EV_CTX + CTX_RP_LO), txrp = rd(CH_CTX(0) + CTX_RP_LO);
+		uint32_t txs = rd(CH_CTX(0)), err = rd(ERROR_LOG);
+		con_str("t DB", "doorbell + 0.5 s, then:");
+		con_hex2("t GF", "sr=", gfsr, "syn0=", syn0);
+		con_hex2("t GF", "syn1=", syn1, "syn2=", syn2);
+		con_hex2("t CB", "fsr=", fsr, "far=", far);
+		con_hex2("t CB", "fsyn0=", fsyn, 0, 0);
+		con_hex2("t GPI", "evrp=", evrp, "txrp=", txrp);
+		con_hex2("t GPI", "tx=", txs, "err=", err);
+	}
 	return wait_event(0);
 }
 
