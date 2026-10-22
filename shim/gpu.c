@@ -1298,6 +1298,11 @@ static void cp_test(void)
 	con_hex2(" target", "value=", got, "cphw=", gpu_r(0x0821));
 	con_hex2(" trust", "now=", gpu_r(0xf400), "int0=", gpu_r(RBBM_INT_0_STATUS));
 	con_str("ZAP", gpu_r(0xf400) == 0 && got == 0x5ec0ff15u ? "SECURE MODE OFF, GPU STILL RUNS" : "secure mode not left");
+#ifdef SWEET_GPU_ENGINE
+	/* hand the live Adreno 615 to the SweetGPU IOKit engine (bsd/dev/sweet_gpu.c) */
+	if (gpu_r(0xf400) == 0 && got == 0x5ec0ff15u)
+		sweet_gpu_engine_online(0x06010500u, 0x100000u, 0x80000u);
+#endif
 #endif
 #ifdef GPU_TRUST
 	/*

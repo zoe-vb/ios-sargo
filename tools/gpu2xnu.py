@@ -109,6 +109,11 @@ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
 extern vm_map_address_t phystokv(uint64_t);
 void sweet_sargo_gpu_init(void);
+/* SweetGPU IOKit engine (bsd/dev/sweet_gpu.c): marked online once the GPU is
+ * out of secure mode. SWEET_GPU_ENGINE gates the call in the generated body so
+ * the bare-metal shim build, which has no engine, still links. */
+#define SWEET_GPU_ENGINE 1
+extern void sweet_gpu_engine_online(uint32_t chip_id, uint64_t gmem_base, uint32_t gmem_size);
 
 /* the shim code casts byte buffers to words and keeps unused diagnostics */
 #pragma clang diagnostic ignored "-Wcast-align"

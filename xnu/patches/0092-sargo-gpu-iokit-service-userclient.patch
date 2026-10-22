@@ -1,0 +1,321 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+new file mode 100644
+index 0000000..435665b
+--- /dev/null
++++ b/bsd/dev/sweet_gpu.c
+@@ -0,0 +1,76 @@
++/*
++ * SweetGPU engine for the Pixel 3a (sargo), Adreno 615. Increment 1: records
++ * the GPU as online once sweet_sargo_gpu.c has brought it out of secure mode,
++ * and answers GET_PARAM. The VA allocator and submit/fence path arrive in the
++ * next patch; they return -ENOTSUP until then so the user client links and the
++ * service registers. Transplanted (with permission) from ios-sailfish.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/locks.h>
++#include "sweet_gpu.h"
++
++static bool g_online;
++static uint32_t g_chip_id, g_gmem_size;
++static uint64_t g_gmem_base;
++
++void
++sweet_gpu_engine_online(uint32_t chip_id, uint64_t gmem_base, uint32_t gmem_size)
++{
++	g_chip_id = chip_id;
++	g_gmem_base = gmem_base;
++	g_gmem_size = gmem_size;
++	__asm__ volatile("dmb ish" ::: "memory");
++	g_online = true;
++	printf("SWEET GPU: engine online, chip %#x, GMEM %#x @ %#llx\n",
++	    chip_id, gmem_size, gmem_base);
++}
++
++bool
++sweet_gpu_ready(void)
++{
++	return g_online;
++}
++
++void
++sweet_gpu_get_info(struct sweet_gpu_info *info)
++{
++	info->chip_id = g_chip_id;
++	info->gmem_size = g_gmem_size;
++	info->gmem_base = g_gmem_base;
++	info->max_freq = 180000000ull;		/* MIN_SVS; raised with DVFS later */
++	info->fence_pa = 0;			/* set once the fence page exists */
++}
++
++/* ---- VA space + submit: implemented in the next patch ---- */
++uint64_t
++sweet_gpu_vm_map(__unused const uint64_t *pa, __unused uint32_t npages, __unused bool readonly)
++{
++	return 0;
++}
++
++void
++sweet_gpu_vm_unmap(__unused uint64_t gva)
++{
++}
++
++int
++sweet_gpu_vm_range(__unused uint64_t gva, __unused uint64_t len)
++{
++	return -1;
++}
++
++int
++sweet_gpu_submit(__unused const struct sweet_gpu_ib *ib, __unused uint32_t n, __unused uint32_t *seqno)
++{
++	return ENOTSUP;
++}
++
++int
++sweet_gpu_wait(__unused uint32_t seqno, __unused uint32_t timeout_ms)
++{
++	return ENOTSUP;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_gpu.h b/bsd/dev/sweet_gpu.h
+new file mode 100644
+index 0000000..5e13870
+--- /dev/null
++++ b/bsd/dev/sweet_gpu.h
+@@ -0,0 +1,50 @@
++/*
++ * SweetGPU engine API (bsd/dev/sweet_gpu.c), used by the IOKit user client
++ * iokit/Kernel/arm/SweetGPU.cpp. The GPU is brought up out of secure mode by
++ * bsd/dev/sweet_sargo_gpu.c (boot-arg sargogpu=1); it calls
++ * sweet_gpu_engine_online() when the Adreno 615 is running, which is when
++ * sweet_gpu_ready() turns true. Transplanted (with permission) from the
++ * ios-sailfish a5xx design, adapted to the sargo a6xx bring-up.
++ */
++#ifndef _SWEET_GPU_H_
++#define _SWEET_GPU_H_
++#include <stdint.h>
++#include <stdbool.h>
++
++struct sweet_gpu_ib {
++	uint64_t iova;			/* GPU VA of the command buffer */
++	uint32_t dwords;
++	uint32_t pad;
++};
++
++struct sweet_gpu_info {
++	uint32_t chip_id;		/* core<<24 | major<<16 | minor<<8 | patch */
++	uint32_t gmem_size;
++	uint64_t gmem_base;
++	uint64_t max_freq;		/* Hz */
++	uint64_t fence_pa;		/* fence page: u32 last completed seqno at +0 */
++};
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++bool sweet_gpu_ready(void);
++void sweet_gpu_get_info(struct sweet_gpu_info *info);
++
++/* GPU VA space: map/unmap wired physical pages; returns GPU VA or 0. */
++uint64_t sweet_gpu_vm_map(const uint64_t *pa, uint32_t npages, bool readonly);
++void sweet_gpu_vm_unmap(uint64_t gva);
++int sweet_gpu_vm_range(uint64_t gva, uint64_t len);	/* 0 if [gva,+len) is mapped */
++
++/* Submit IBs (chained into the ring) + a fence; returns 0 and *seqno. */
++int sweet_gpu_submit(const struct sweet_gpu_ib *ib, uint32_t n, uint32_t *seqno);
++int sweet_gpu_wait(uint32_t seqno, uint32_t timeout_ms);
++
++/* Called by the bring-up once the GPU is out of secure mode and usable. */
++void sweet_gpu_engine_online(uint32_t chip_id, uint64_t gmem_base, uint32_t gmem_size);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* _SWEET_GPU_H_ */
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+new file mode 100644
+index 0000000..ffb290d
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -0,0 +1,109 @@
++/*
++ * SweetGPU: IOKit service + user client for the Adreno 615 (engine in
++ * bsd/dev/sweet_gpu.c). Registers as SweetGPU on IOResources; user space opens
++ * it (IOServiceMatching("SweetGPU"), IOServiceOpen type 0). Increment 1
++ * implements GET_PARAM (sel 15); the GEM / submit / fence selectors (10-14, 16)
++ * arrive with the engine's VA + submit path. Transplanted (with permission)
++ * from ios-sailfish, adapted to the sargo a6xx engine.
++ *
++ * Selectors (tools/sweetgl/sweet_drm.c):
++ *   10 bo new      in[1]=size            out[3]=handle, gpu_iova, flags
++ *   11 bo free     in[1]=handle
++ *   12 bo import   in[1]=surface id      out[3]=handle, gpu_iova, size
++ *   13 submit      struct: IBs + bo list out: seqno
++ *   14 wait fence  in[2]=seqno, timeout_ms
++ *   15 info        out: chip id, GMEM size/base, max freq
++ *   16 bo cpu-fini in[1]=handle
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <sys/errno.h>
++extern "C" {
++#include "../../../bsd/dev/sweet_gpu.h"
++}
++
++class SweetGPU : public IOService {
++	OSDeclareDefaultStructors(SweetGPU);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(SweetGPU, IOService);
++
++bool
++SweetGPU::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "SweetGPUUserClient");
++	registerService();
++	IOLog("SWEET GPU: SweetGPU registered\n");
++	return true;
++}
++
++class SweetGPUUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(SweetGPUUserClient);
++public:
++	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(SweetGPUUserClient, IOUserClient);
++
++bool
++SweetGPUUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	return IOUserClient::initWithTask(owningTask, securityID, type);
++}
++
++IOReturn
++SweetGPUUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target, __unused void *reference)
++{
++	if (!sweet_gpu_ready()) {
++		return kIOReturnNotReady;
++	}
++	switch (selector) {
++	case 15: {                      /* info */
++		if (args->scalarOutputCount < 4) {
++			return kIOReturnBadArgument;
++		}
++		struct sweet_gpu_info info;
++		sweet_gpu_get_info(&info);
++		args->scalarOutput[0] = info.chip_id;
++		args->scalarOutput[1] = info.gmem_size;
++		args->scalarOutput[2] = info.gmem_base;
++		args->scalarOutput[3] = info.max_freq;
++		args->scalarOutputCount = 4;
++		return kIOReturnSuccess;
++	}
++	case 14:                        /* wait fence */
++		if (args->scalarInputCount != 2) {
++			return kIOReturnBadArgument;
++		}
++		{
++			uint32_t to = (uint32_t)(args->scalarInput[1] < 60000 ? args->scalarInput[1] : 60000);
++			int e = sweet_gpu_wait((uint32_t)args->scalarInput[0], to);
++			return e == 0 ? kIOReturnSuccess :
++			    e == ETIMEDOUT ? kIOReturnTimeout : kIOReturnUnsupported;
++		}
++	case 10: case 11: case 12: case 13: case 16:
++		return kIOReturnUnsupported;	/* GEM / submit: next patch */
++	default:
++		return kIOReturnBadArgument;
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 48a8f63..652b440 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -3,6 +3,7 @@ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sdhc.c			standard
+ bsd/dev/sweet_sargo_touch.c		standard
+ bsd/dev/sweet_sargo_gpu.c		standard
++bsd/dev/sweet_gpu.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/bsd/dev/sweet_sargo_gpu.c b/bsd/dev/sweet_sargo_gpu.c
+index c9328f8..24517e6 100644
+--- a/bsd/dev/sweet_sargo_gpu.c
++++ b/bsd/dev/sweet_sargo_gpu.c
+@@ -34,6 +34,11 @@ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+ extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ extern vm_map_address_t phystokv(uint64_t);
+ void sweet_sargo_gpu_init(void);
++/* SweetGPU IOKit engine (bsd/dev/sweet_gpu.c): marked online once the GPU is
++ * out of secure mode. SWEET_GPU_ENGINE gates the call in the generated body so
++ * the bare-metal shim build, which has no engine, still links. */
++#define SWEET_GPU_ENGINE 1
++extern void sweet_gpu_engine_online(uint32_t chip_id, uint64_t gmem_base, uint32_t gmem_size);
+ 
+ /* the shim code casts byte buffers to words and keeps unused diagnostics */
+ #pragma clang diagnostic ignored "-Wcast-align"
+@@ -1373,6 +1378,11 @@ static void cp_test(void)
+ 	con_hex2(" target", "value=", got, "cphw=", gpu_r(0x0821));
+ 	con_hex2(" trust", "now=", gpu_r(0xf400), "int0=", gpu_r(RBBM_INT_0_STATUS));
+ 	con_str("ZAP", gpu_r(0xf400) == 0 && got == 0x5ec0ff15u ? "SECURE MODE OFF, GPU STILL RUNS" : "secure mode not left");
++#ifdef SWEET_GPU_ENGINE
++	/* hand the live Adreno 615 to the SweetGPU IOKit engine (bsd/dev/sweet_gpu.c) */
++	if (gpu_r(0xf400) == 0 && got == 0x5ec0ff15u)
++		sweet_gpu_engine_online(0x06010500u, 0x100000u, 0x80000u);
++#endif
+ #endif
+ #ifdef GPU_TRUST
+ 	/*
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 330e52d..ddafd34 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -6,6 +6,11 @@
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
+     "   },"
++    "   {"
++    "     'IOClass'         = SweetGPU;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = SweetGPU;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 90865c7..fc69bf6 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -2,6 +2,7 @@ iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitc
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
++iokit/Kernel/arm/SweetGPU.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp

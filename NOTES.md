@@ -58,8 +58,22 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   after auth (t28/t29). Next: fold all three into tools/gpu2xnu.py -> regenerate xnu 0089, boot GPU-in-iOS out
   of secure mode, then a real RB render + GLES/freedreno into CoreAnimation (ios-sailfish approach).**
   **DONE: GPU out of secure mode IN iOS (x25, 0091 15d6ffc) - no hang.** XNU-only fixes vs shim: map 'reg'+sec_mem to physical (io_va/SEC_PA), mask IRQs around the SMC (ml_set_interrupts_enabled). Next: turn the probe into an IOKit SweetGPU service + msm-style user client, build Mesa freedreno + libdrm/msm shim + EAGL shim, inject into backboardd for CoreAnimation GLES (ios-sailfish approach).
-  Plan: GLES via Mesa freedreno like
-  joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
+  **GPU->USERLAND milestone 1, increment 1 - patch 0092 (WRITTEN, not built/tested): the SweetGPU IOKit
+  service + user client.** New files: bsd/dev/sweet_gpu.{h,c} (engine API + minimal engine) and
+  iokit/Kernel/arm/SweetGPU.cpp (SweetGPU IOService on IOResources, sets kIOUserClientClassKey=
+  SweetGPUUserClient; user client externalMethod selectors 10-16). Increment 1 wires only GET_PARAM
+  (sel 15 -> chip 0x06010500, GMEM 0x80000 @ 0x100000, 180 MHz) and WAIT (sel 14); the GEM/submit/fence
+  selectors (10-13,16) return kIOReturnUnsupported until increment 2 (patch 0093). The bring-up calls
+  sweet_gpu_engine_online() at the ZAP "SECURE MODE OFF" success point: added to shim/gpu.c under
+  `#ifdef SWEET_GPU_ENGINE` (so the bare shim still links) and gpu2xnu.py defines it + declares the extern,
+  so the generated bsd/dev/sweet_sargo_gpu.c now marks the engine online. Registered in bsd/conf/files,
+  iokit/conf/files.arm64, iokit/KernelConfigTables.cpp (mirrors SweetBattery/SweetHIDTouch). Patch verified
+  to apply on the 0089/0090/0091 tree; sweet_gpu.c (C) and SweetGPU.cpp (C++) pass clang -fsyntax-only
+  against stubs. Next: build 0092 CI kernel -> x26 (x25 cmdline, sargogpu=1), open the SweetGPU service from
+  a test tool, call GET_PARAM, confirm chip 615; then patch 0093 = live VA allocator + submit/fence.
+  Plan: GLES via Mesa freedreno like joranv1/ios-sailfish. **Author OK'd code reuse (owner relayed
+  2026-10-22); transplanted files carry a "Transplanted (with permission) from ios-sailfish" header.
+  Add a LICENSE/NOTICE entry crediting ios-sailfish when the userland (Mesa shim/EAGL) lands.**
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
