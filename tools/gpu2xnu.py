@@ -128,7 +128,7 @@ void sweet_sargo_gpu_init(void);
 #define GPU_ZAP 1
 
 /* ---- physical -> virtual windows (ml_io_map) ---- */
-static struct { uint64_t pa, size; vm_offset_t va; } io_win[16];
+static struct { uint64_t pa, size; vm_offset_t va; } io_win[32];
 static unsigned io_nwin;
 
 static vm_offset_t
@@ -139,7 +139,7 @@ io_va_map(uint64_t pa, uint64_t size)
 			return io_win[i].va + (vm_offset_t)(pa - io_win[i].pa);
 	uint64_t base = pa & ~(uint64_t)PAGE_MASK;
 	uint64_t len = (pa + size - base + PAGE_MASK) & ~(uint64_t)PAGE_MASK;
-	vm_offset_t va = io_nwin < 16 ? ml_io_map((vm_offset_t)base, (vm_size_t)len) : 0;
+	vm_offset_t va = io_nwin < 32 ? ml_io_map((vm_offset_t)base, (vm_size_t)len) : 0;
 	if (!va) {
 		panic("SWEET GPU: cannot map %#llx", pa);
 	}
@@ -147,6 +147,28 @@ io_va_map(uint64_t pa, uint64_t size)
 	io_win[io_nwin].size = len;
 	io_win[io_nwin++].va = va;
 	return va + (vm_offset_t)(pa - base);
+}
+
+/*
+ * x21: mapping page by page ran out of the 16 slots at the first GPU core
+ * register (RBBM_STATUS 0x5000840, panic): map the blocks whole up front.
+ */
+static void
+io_premap(void)
+{
+	static const struct { uint64_t pa, size; } blocks[] = {
+		{0x00100000, 0x1f0000},	/* GCC */
+		{0x05000000, 0x0a0000},	/* GPU, GPU SMMU, GMU (+RSCC, AO), GPU CC */
+		{0x0b280000, 0x010000},	/* GPU PDC */
+		{0x0b480000, 0x010000},	/* GPU PDC sequencer */
+		{0x0c3f0000, 0x001000},	/* AOP message RAM (cmd-db locator) */
+		{0x179e0000, 0x004000},	/* apps RSC DRV 2 */
+		{0x17a00000, 0x010000},	/* GICD */
+		{0x17a60000, 0x020000},	/* GICR CPU 0 */
+		{0x95c14000, 0x004000},	/* zap region 0x95c15000 (stock DT) */
+	};
+	for (unsigned i = 0; i < sizeof(blocks) / sizeof(blocks[0]); i++)
+		(void)io_va_map(blocks[i].pa, blocks[i].size);
 }
 
 static vm_offset_t
@@ -260,6 +282,7 @@ gpu_thread(void *arg, wait_result_t result)
 	printf("SWEET GPU: DMA %#llx (%#x bytes), firmware gmu %ld sqe %ld mdt %ld b02 %ld\n",
 	    pa, DMA_SIZE, (long)(gmu_fw_end - gmu_fw), (long)(sqe_fw_end - sqe_fw),
 	    (long)(zap_mdt_end - zap_mdt), (long)(zap_b02_end - zap_b02));
+	io_premap();
 	test_gpu();
 	printf("SWEET GPU: thread done\n");
 }
