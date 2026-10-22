@@ -42,6 +42,13 @@ command -v mkbootimg >/dev/null && MKBOOTIMG=mkbootimg || MKBOOTIMG="python3 ../
 [ "${TOUCH:-}" = bb ] && BDEF="$BDEF -DTOUCH_BB"
 # GPU=1 (sargo): the diagnostic screen runs the Adreno/GMU probe (shim/gpu.c)
 [ -n "${GPU:-}" ] && BDEF="$BDEF -DBRINGUP_GPU"
+# GPU=gmu: also boot the GMU; embeds research/sargo-gpu-fw/a630_gmu.bin (not in git)
+GMUFW=
+if [ "${GPU:-}" = gmu ]; then
+	GMUFW=$(cd .. && pwd)/research/sargo-gpu-fw/a630_gmu.bin
+	[ -f "$GMUFW" ] || { echo "error: $GMUFW missing (docs/SARGO.md, GPU bring-up)" >&2; exit 1; }
+	BDEF="$BDEF -DGPU_GMU_BOOT"
+fi
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $BDEF"
 # sweet keeps the historical out/ (NOTES.md refers to it)
 [ $BOARD = sweet ] && OUT=out || OUT=out/$BOARD
@@ -51,6 +58,11 @@ for f in start.S shim.c console.c mmu.c fdt.c loader.c $DRV; do
 	$CC $CFLAGS -c $f -o $OUT/${f%.*}.o
 	OBJS+=($OUT/${f%.*}.o)
 done
+if [ -n "$GMUFW" ]; then
+	printf '\t.section .rodata\n\t.balign 16\n\t.globl gmu_fw, gmu_fw_end\ngmu_fw:\n\t.incbin "%s"\ngmu_fw_end:\n' "$GMUFW" > $OUT/gmufw.S
+	$CC $CFLAGS -c $OUT/gmufw.S -o $OUT/gmufw.o
+	OBJS+=($OUT/gmufw.o)
+fi
 # The image runs wherever ABL puts it with no relocation pass: only the
 # header's image_size (start.o, linked at 0) may be an absolute address.
 abs=$($READELF -r "${OBJS[@]:1}" | grep -c ABS64 || true)
