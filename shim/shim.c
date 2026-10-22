@@ -420,8 +420,13 @@ static void __attribute__((noreturn)) board_bringup(uintptr_t dtb)
 	test_gic();
 #endif
 	con_skip();
+#ifdef BRINGUP_TOUCH
+	stage = "touch";
+	test_touch();
+#else
 	stage = "emmc";
 	test_emmc();
+#endif
 	con_skip();
 	con_str("DONE", "photo this screen; reset ~3 min");
 	delay_ms(180000);

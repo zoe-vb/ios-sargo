@@ -17,7 +17,7 @@ sweet) BDEF=; DTB=${DTB:-../dtb/boot_unpacked/dtb}; HEADER=${HEADER:-v2}
 sargo) BDEF=-DBOARD_SARGO; DTB=${DTB:-../dtb/sargo/dtb}; HEADER=${HEADER:-v1}
 	# ABL b4s4-0.1-5653622 hangs on "fastboot boot" of an uncompressed Image-dtb
 	KGZ=${KGZ-1}; EMBED=${EMBED-1}
-	DRV=emmc.c; OS_VERSION=${OS_VERSION:-9.0.0}; PATCH_LEVEL=${PATCH_LEVEL:-2019-03} ;;	# = stock boot.img header
+	DRV="emmc.c touch.c"; OS_VERSION=${OS_VERSION:-9.0.0}; PATCH_LEVEL=${PATCH_LEVEL:-2019-03} ;;	# = stock boot.img header
 *) echo "unknown BOARD=$BOARD" >&2; exit 1 ;;
 esac
 if [ -n "${LLVM:-}" ]; then
@@ -34,6 +34,8 @@ else
 	OBJCOPY=aarch64-linux-gnu-objcopy; READELF=aarch64-linux-gnu-readelf; NM=aarch64-linux-gnu-nm
 fi
 command -v mkbootimg >/dev/null && MKBOOTIMG=mkbootimg || MKBOOTIMG="python3 ../tools/mkbootimg.py"
+# TOUCH=1 (sargo): the diagnostic screen runs the touch probe instead of the eMMC test
+[ -n "${TOUCH:-}" ] && BDEF="$BDEF -DBRINGUP_TOUCH"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $BDEF"
 # sweet keeps the historical out/ (NOTES.md refers to it)
 [ $BOARD = sweet ] && OUT=out || OUT=out/$BOARD
