@@ -238,7 +238,14 @@ right after: the request itself crashes the GMU; pacing irrelevant. **t15e (967f
 GMU off + 200 MHz, BW_TABLE = Linux a6xx fixed table, TEST) all answered 0 -> **OOB GPU_SET acked, no CM3_FAULT**
 (GMU fixed); AUTH_AND_RESET still hangs. **t15f (af302d4, IMG_0073)**: RPMh CE0 BCM vote (cmd-db addr 0x500a0,
 data 0x60004001) via apps RSC DRV2 ACTIVE TCS completed (cmd status 0x10101); AUTH_AND_RESET still hangs.
-Open: TZ says PAS 13 unsupported; no visible reason for the hang yet.
+**t16 (9f521fb)**: CPU write RBBM_SECVID_TRUST_CNTL = 0 (Linux's no-zap path) hangs the phone (no reset) - the
+register is protected. **t17 (b382493)**: the full Linux a6xx hw_init for a615 (HWCG table, CGC, CP protect,
+UBWC, hang detect, INT mask, ...) and the zap load right after CP_ME_INIT + idle, exactly as hw_init: same hang.
+**t17b (7186f21, IMG_0074)**: zap region at mainline's 0x97a15000 instead of the Android 9 DT's 0x95c15000:
+MEM_SETUP accepts it too (0), same hang. So neither the region nor our GPU programming is the cause. Not
+done like Android: nothing ran before us in this boot that Android's kernel runs (other PIL loads, QSEECOM,
+hypervisor memory assignment for the shim's own memory), we call from EL1 with MMU/caches off. TZ says
+PAS 13 unsupported (IS_SUPPORTED = 0) although INIT_IMAGE/MEM_SETUP succeed. Parked: continue in XNU.
 
 ## Stage plan
 
