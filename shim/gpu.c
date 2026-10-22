@@ -629,23 +629,37 @@ static uint32_t pkt7(unsigned op, unsigned cnt)
 
 #ifdef GPU_ZAP
 /* qcom_scm SMCCC convention: SIP, SMC64, standard call; x0 status, x1 result */
+/*
+ * t26: mainline __scm_smc_do_quirk passes x7 = args[7] = 0 and x6 = the saved
+ * a6 (0 first, returned-a6 on resume). We previously left x7 as a clobber
+ * (garbage) - SMCCC requires unused args 0. Also count INTERRUPTED spins:
+ * mainline services IRQs between resumes; if TZ keeps returning INTERRUPTED
+ * because a pending interrupt is never handled, a bare masked-IRQ caller
+ * spins forever (looks like a hang). Cap and report instead.
+ */
+static uint32_t scm_intr;	/* INTERRUPTED spins of the last scm() call */
 static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t *res)
 {
-	register uint64_t x0 __asm__("x0") = 0x42000000u | svc_cmd;
-	register uint64_t x1 __asm__("x1") = arginfo;
-	register uint64_t x2 __asm__("x2") = a0;
-	register uint64_t x3 __asm__("x3") = a1;
-	register uint64_t x4 __asm__("x4") = a2;
-	register uint64_t x5 __asm__("x5") = 0;
-	register uint64_t x6 __asm__("x6") = 0;
+	register uint64_t x0 __asm__("x0");
+	register uint64_t x1 __asm__("x1");
+	register uint64_t x2 __asm__("x2");
+	register uint64_t x3 __asm__("x3");
+	register uint64_t x4 __asm__("x4");
+	register uint64_t x5 __asm__("x5");
+	register uint64_t x6 __asm__("x6");
+	register uint64_t x7 __asm__("x7");
+	scm_intr = 0;
 	for (unsigned tries = 0; tries < 20; tries++) {
 		uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
 		do {	/* QCOM_SCM_INTERRUPTED (1): resume with x0 = 1, x6 as returned */
-			x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = 0; x6 = sess;
-			__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
-			    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+			x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = 0; x6 = sess; x7 = 0;
+			__asm__ volatile("smc #0"
+			    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
+			    : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
 			fn = 1;
 			sess = x6;
+			if (x0 == 1 && ++scm_intr >= 4000000u)	/* ~ seconds of spinning: give up */
+				break;
 		} while (x0 == 1);
 		if ((int64_t)x0 != -12)		/* QCOM_SCM_V2_EBUSY */
 			break;
@@ -715,12 +729,13 @@ static int64_t scm5(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1
     uint64_t a3, uint64_t *res)
 {
 	register uint64_t x0 __asm__("x0"), x1 __asm__("x1"), x2 __asm__("x2"), x3 __asm__("x3");
-	register uint64_t x4 __asm__("x4"), x5 __asm__("x5"), x6 __asm__("x6");
+	register uint64_t x4 __asm__("x4"), x5 __asm__("x5"), x6 __asm__("x6"), x7 __asm__("x7");
 	uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
 	do {
-		x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = a3; x6 = sess;
-		__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
-		    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+		x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = a3; x6 = sess; x7 = 0;
+		__asm__ volatile("smc #0"
+		    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
+		    : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
 		fn = 1;
 		sess = x6;
 	} while (x0 == 1);
@@ -894,6 +909,7 @@ static int zap_load(void)
 	con_hex2(" quiet", "isr=", (uint32_t)isr, "spi pend=", rd(0x17a00000UL + 0x224));
 	con_str(" pas", "AUTH_AND_RESET...");
 	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
+	con_hex2(" auth", "x0=", (uint32_t)rr, "intr=", scm_intr);
 	con_hex2(" pas", "auth=", (uint32_t)rr, "word0=", *(volatile uint32_t *)ZAP_REGION);
 	return rr == 0;
 }
