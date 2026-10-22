@@ -44,6 +44,10 @@
  * bytes from .b02), copy, AUTH_AND_RESET; then CP_SET_SECURE_MODE 0 and a
  * second CP_MEM_WRITE, with RBBM_SECVID_TRUST_CNTL read before and after.
  *
+ * t16 (GPU=trust, -DGPU_TRUST): no zap shader; after the ring test the CPU
+ * writes RBBM_SECVID_TRUST_CNTL = 0 (Linux's no-zap path), then the GPU
+ * does a second CP_MEM_WRITE.
+ *
  * Register offsets: Linux gcc-sdm845.c (also SDM670), gpucc-sdm845.c and
  * registers/adreno/a6xx_gmu.xml (dword offsets from the GPU base).
  *
@@ -836,6 +840,38 @@ static void cp_test(void)
 	con_hex2(" target", "value=", got, "cphw=", gpu_r(0x0821));
 	con_hex2(" trust", "now=", gpu_r(0xf400), "int0=", gpu_r(RBBM_INT_0_STATUS));
 	con_str("ZAP", gpu_r(0xf400) == 0 && got == 0x5ec0ff15u ? "SECURE MODE OFF, GPU STILL RUNS" : "secure mode not left");
+#endif
+#ifdef GPU_TRUST
+	/*
+	 * t16: the zap shader's AUTH_AND_RESET hangs (t15..t15f). Linux's
+	 * no-zap path instead: RBBM_SECVID_TRUST_CNTL = 0 from the CPU. On
+	 * a5xx (ios-sailfish) this reset the phone. Then a second CP_MEM_WRITE.
+	 */
+	if (got != 0xc0ffee15u)
+		return;
+	con_hex2("TRUST", "before=", gpu_r(0xf400), "writing=", 0);
+	gpu_w(0xf400, 0);
+	con_hex2("TRUST", "after=", gpu_r(0xf400), "int0=", gpu_r(RBBM_INT_0_STATUS));
+	unsigned start = n;
+	ring[n++] = pkt7(0x3d, 3);			/* CP_MEM_WRITE */
+	ring[n++] = GPU_IOVA + GPU_TARGET + 4;
+	ring[n++] = 0;
+	ring[n++] = 0x5ec0ff16u;
+	mem[GPU_TARGET / 4 + 1] = 0xdeadbeefu;
+	__asm__ volatile("dsb sy" ::: "memory");
+	gpu_w(0x0807, n);
+	for (ms = 0; ms < 200; ms++) {
+		rptr = gpu_r(0x0806);
+		got = mem[GPU_TARGET / 4 + 1];
+		if (rptr == n && got == 0x5ec0ff16u)
+			break;
+		udelay(1000);
+	}
+	con_hex2("CP2", "rptr=", rptr, "wptr=", n);
+	con_hex2(" from", "start=", start, "ms=", ms);
+	con_hex2(" target", "value=", got, "cphw=", gpu_r(0x0821));
+	con_hex2(" trust", "now=", gpu_r(0xf400), "int0=", gpu_r(RBBM_INT_0_STATUS));
+	con_str("TRUST", gpu_r(0xf400) == 0 && got == 0x5ec0ff16u ? "SECURE MODE OFF, GPU STILL RUNS" : "secure mode not left");
 #endif
 }
 #endif
