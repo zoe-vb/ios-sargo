@@ -16,8 +16,17 @@
  * SMMU context bank (CB 1, stage 1) mapping 64 KiB of shim memory at the
  * GMU's uncached window 0x60000000 for GMU streams 4/5, the firmware
  * (a630_gmu.bin, embedded at build time, not in git) into the CM3 ITCM, the
- * boot registers, then CM3 reset release and a poll for 0xbabeface. Not
- * done yet: RPMh/PDC init, RPMH_CTRL votes, GX power, HFI queues.
+ * boot registers, then CM3 reset release and a poll for 0xbabeface.
+ * t12: the GPU SMMU firmware drops masked SMRs; exact ones (5, 4) stick.
+ *
+ * t13 (GPU=gx, also -DGPU_GX_ON): before the boot, Linux a6xx_gmu_rpmh_init
+ * (RSCC sequencer + PDC TCS/sequencer, a615 values), the HFI queue table and
+ * a6xx_gmu_power_config (active idle level, RPMh votes on); after it,
+ * a6xx_gmu_gfx_rail_on (GX/MX ARC vote indexes for the lowest GPU level,
+ * MIN_SVS, from cmd-db "gfx.lvl"/"mx.lvl"; downstream finds the cmd-db
+ * through the AOP message RAM word at 0xc3f000c), OOB BOOT_SLUMBER, SPTPRAC on,
+ * HFI_CTRL_INIT, OOB GPU_SET. GPU core (GX) registers are read only if
+ * GMU_SPTPRAC_PWR_CLK_STATUS says GX power and clock are on.
  *
  * Register offsets: Linux gcc-sdm845.c (also SDM670), gpucc-sdm845.c and
  * registers/adreno/a6xx_gmu.xml (dword offsets from the GPU base).
@@ -67,6 +76,31 @@
 #define GMU_GENERAL_7		0x1f9cc
 #define GMU_AO_HOST_INTR_STATUS	0x23b05
 #define GMU_AHB_FENCE_RANGE_0	0x23b11
+#define GMU_GX_SPTPRAC_POWER_CONTROL	0x1a881
+#define GMU_BOOT_SLUMBER_OPTION	0x1cbf8
+#define GMU_GX_VOTE_IDX		0x1cbf9
+#define GMU_MX_VOTE_IDX		0x1cbfa
+#define GMU_PWR_COL_INTER_FRAME_CTRL	0x1f8c0
+#define GMU_SPTPRAC_PWR_CLK_STATUS	0x1f8d0
+#define GMU_RPMH_CTRL		0x1f8e8
+#define GMU_HFI_CTRL_INIT	0x1f986
+#define GMU_GMU2HOST_INTR_CLR	0x1f991
+#define GMU_HOST2GMU_INTR_SET	0x1f994
+#define GMU_RSCC_CONTROL_ACK	0x23b08
+
+/* RSCC = GMU block + 0x23000, dword offsets */
+#define RSCC		(0x0506a000UL + 0x23000)
+#define RSCC_REG(dw)	(RSCC + (uintptr_t)(dw) * 4u)
+/* PDC (sdm670.dtsi gmu_pdc / gmu_pdc_seq), dword offsets */
+#define PDC		0x0b280000UL
+#define PDC_SEQ		0x0b480000UL
+#define PDC_REG(dw)	(PDC + (uintptr_t)(dw) * 4u)
+#define CMD_DB_PTR	0x0c3f000cUL	/* stock DT qcom,cmd-db: base, size of the cmd-db */
+
+/* GPU core (GX) registers, dword offsets from the GPU base */
+#define RBBM_STATUS	0x0210
+#define RBBM_INT_0_STATUS	0x0201
+#define CP_SCRATCH0	0x0883
 
 #define GSMMU		0x05040000UL	/* arm,smmu-kgsl (qcom,smmu-v2) */
 #define GSMMU_GR1	(GSMMU + 0x1000)
@@ -225,6 +259,204 @@ static int gsmmu_map_gmu(void)
 	return have5;
 }
 
+#ifdef GPU_GX_ON
+/* Linux a6xx_gmu_rpmh_init for a615 (pdc_address_offset 0x30080, TCS3 data 3) */
+static void gmu_rpmh_init(void)
+{
+	wr(RSCC_REG(0x0004), 1u << 24);		/* RSC_STATUS0_DRV0: no SDE clock gating */
+	wr(RSCC_REG(0x000b), 1);		/* PDC_SLAVE_ID_DRV0 */
+	wr(RSCC_REG(0x000e), 0);		/* HIDDEN_TCS_CMD0_DATA */
+	wr(RSCC_REG(0x000d), 0);		/* HIDDEN_TCS_CMD0_ADDR */
+	wr(RSCC_REG(0x000e + 2), 0);
+	wr(RSCC_REG(0x000d + 2), 0);
+	wr(RSCC_REG(0x000e + 4), 0x80000000u);
+	wr(RSCC_REG(0x000d + 4), 0);
+	wr(RSCC_REG(0x0100), 0);		/* OVERRIDE_START_ADDR */
+	wr(RSCC_REG(0x0008), 0x4520);		/* PDC_SEQ_START_ADDR */
+	wr(RSCC_REG(0x0009), 0x4510);		/* PDC_MATCH_VALUE_LO */
+	wr(RSCC_REG(0x000a), 0x4514);		/* PDC_MATCH_VALUE_HI */
+	wr(RSCC_REG(0x0180), 0xa7a506a0u);	/* SEQ_MEM_0_DRV0 */
+	wr(RSCC_REG(0x0181), 0xa1e6a6e7u);
+	wr(RSCC_REG(0x0182), 0xa2e081e1u);
+	wr(RSCC_REG(0x0183), 0xe9a982e2u);
+	wr(RSCC_REG(0x0184), 0x0020e8a8u);
+
+	wr(PDC_SEQ + 0x0, 0xfebea1e1u);		/* PDC_GPU_SEQ_MEM_0.. */
+	wr(PDC_SEQ + 0x4, 0xa5a4a3a2u);
+	wr(PDC_SEQ + 0x8, 0x8382a6e0u);
+	wr(PDC_SEQ + 0xc, 0xbce3e284u);
+	wr(PDC_SEQ + 0x10, 0x002081fcu);
+
+	wr(PDC_REG(0x1573), 7);			/* TCS1_CMD_ENABLE_BANK */
+	wr(PDC_REG(0x1574), 0);			/* TCS1_CMD_WAIT_FOR_CMPL_BANK */
+	wr(PDC_REG(0x1572), 0);			/* TCS1_CONTROL */
+	wr(PDC_REG(0x1575), 0x10108);		/* TCS1_CMD0_MSGID/ADDR/DATA */
+	wr(PDC_REG(0x1576), 0x30010);
+	wr(PDC_REG(0x1577), 1);
+	wr(PDC_REG(0x1575 + 4), 0x10108);
+	wr(PDC_REG(0x1576 + 4), 0x30000);
+	wr(PDC_REG(0x1577 + 4), 0);
+	wr(PDC_REG(0x1575 + 8), 0x10108);
+	wr(PDC_REG(0x1576 + 8), 0x30080);
+	wr(PDC_REG(0x1577 + 8), 0);
+	wr(PDC_REG(0x15d7), 7);			/* TCS3 */
+	wr(PDC_REG(0x15d8), 0);
+	wr(PDC_REG(0x15d6), 0);
+	wr(PDC_REG(0x15d9), 0x10108);
+	wr(PDC_REG(0x15da), 0x30010);
+	wr(PDC_REG(0x15db), 2);
+	wr(PDC_REG(0x15d9 + 4), 0x10108);
+	wr(PDC_REG(0x15da + 4), 0x30000);
+	wr(PDC_REG(0x15db + 4), 3);
+	wr(PDC_REG(0x15d9 + 8), 0x10108);
+	wr(PDC_REG(0x15da + 8), 0x30080);
+	wr(PDC_REG(0x15db + 8), 3);
+	wr(PDC_REG(0x1148), 0);			/* GPU_SEQ_START_ADDR */
+	wr(PDC_REG(0x1140), 0x80000001u);	/* GPU_ENABLE_PDC */
+	con_hex2(" pdc", "en=", rd(PDC_REG(0x1140)), "rscseq=", rd(RSCC_REG(0x0180)));
+}
+
+/* Linux cmd_db_read_aux_data(): the ARC level list of an RPMh resource */
+static const uint16_t *cmd_db_aux(const char *id, unsigned *count)
+{
+	uint32_t base = rd(CMD_DB_PTR), size = rd(CMD_DB_PTR + 4);
+	static int shown;
+	if (!shown++)
+		con_hex2("CMDDB", "base=", base, "size=", size);
+	if (base < 0x80000000u || base >= 0xa0000000u || size < 144 || size > 0x40000)
+		return 0;
+	const uint8_t *db = (const uint8_t *)(uintptr_t)base;
+	if (db[4] != 0xdb || db[5] != 0x30 || db[6] != 0x03 || db[7] != 0x0c)
+		return 0;
+	const uint8_t *data = db + 144;		/* sizeof(struct cmd_db_header) */
+	for (unsigned s = 0; s < 8; s++) {
+		const uint8_t *h = db + 8 + 16 * s;
+		unsigned hoff = h[2] | h[3] << 8, doff = h[4] | h[5] << 8, cnt = h[6] | h[7] << 8;
+		for (unsigned e = 0; e < cnt; e++) {
+			const uint8_t *ent = data + hoff + 24 * e;
+			unsigned k = 0;
+			while (k < 8 && id[k] && ent[k] == (uint8_t)id[k])
+				k++;
+			if (k < 8 && (id[k] || ent[k]))
+				continue;
+			*count = (ent[20] | ent[21] << 8) / 2;
+			return (const uint16_t *)(data + doff + (ent[22] | ent[23] << 8));
+		}
+	}
+	return 0;
+}
+
+/* GX/MX vote for an RPMh level, as a6xx_gmu_rpmh_arc_votes_init */
+static int gx_vote(unsigned level, unsigned *gx, unsigned *mx)
+{
+	unsigned np = 0, ns = 0;
+	const uint16_t *pri = cmd_db_aux("gfx.lvl", &np), *sec = cmd_db_aux("mx.lvl", &ns);
+	if (!pri || !sec || !np || !ns || np > 16 || ns > 16) {
+		con_hex2("CMDDB", "gfx n=", np, "mx n=", ns);
+		return 0;
+	}
+	con_hex2("CMDDB", "gfx n=", np, "mx n=", ns);
+	con_hex2(" gfx", "l0-3=", (uint32_t)pri[0] << 16 | pri[1 % np], "l2-3=", (uint32_t)pri[2 % np] << 16 | pri[3 % np]);
+	*gx = np;
+	for (unsigned j = 0; j < np; j++)
+		if (pri[j] >= level) {
+			*gx = j;
+			break;
+		}
+	*mx = 0;
+	for (unsigned j = 0; j < ns; j++) {
+		if (sec[j] >= level) {
+			*mx = j;
+			break;
+		} else if (sec[j]) {
+			*mx = j;
+		}
+	}
+	con_hex2(" vote", "gx=", *gx, "mx=", *mx);
+	return *gx < np;
+}
+
+/* HFI v1 queue table: command, response (id 4), debug (id 5) queues */
+static void hfi_table_init(void)
+{
+	uint32_t *tbl = (uint32_t *)(gmu_mem + 0x1000);
+	tbl[0] = 0;				/* version */
+	tbl[1] = 6 + 3 * 12;			/* size (dwords) */
+	tbl[2] = 6;				/* qhdr0_offset */
+	tbl[3] = 12;				/* qhdr_size */
+	tbl[4] = 3;
+	tbl[5] = 3;
+	static const uint32_t ids[3] = {0, 4, 5};
+	for (unsigned q = 0; q < 3; q++) {
+		uint32_t *h = tbl + 6 + 12 * q;
+		h[0] = 1;				/* status */
+		h[1] = GMU_HFI_IOVA + 0x1000 * (q + 1);	/* iova */
+		h[2] = 10u << 8 | ids[q];		/* type */
+		h[3] = 4096 >> 2;			/* size */
+		h[4] = 0; h[5] = 0;
+		h[6] = 1; h[7] = 1; h[8] = 1; h[9] = 0;
+		h[10] = 0; h[11] = 0;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* legacy OOB request: set bit, wait for the ack bit, clear it */
+static int gmu_oob(const char *label, unsigned set, unsigned ack)
+{
+	wr(GMU_REG(GMU_HOST2GMU_INTR_SET), 1u << set);
+	int ok = wait_bits(GMU_REG(GMU_GMU2HOST_INTR_INFO), 1u << ack, 1u << ack) ||
+	    wait_bits(GMU_REG(GMU_GMU2HOST_INTR_INFO), 1u << ack, 1u << ack) ||
+	    wait_bits(GMU_REG(GMU_GMU2HOST_INTR_INFO), 1u << ack, 1u << ack) ||
+	    wait_bits(GMU_REG(GMU_GMU2HOST_INTR_INFO), 1u << ack, 1u << ack) ||
+	    wait_bits(GMU_REG(GMU_GMU2HOST_INTR_INFO), 1u << ack, 1u << ack);	/* ~10 ms */
+	con_hex2(label, "ack=", ok, "g2h=", rd(GMU_REG(GMU_GMU2HOST_INTR_INFO)));
+	wr(GMU_REG(GMU_GMU2HOST_INTR_CLR), 1u << ack);
+	return ok;
+}
+
+static void gx_on_and_probe(void)
+{
+	unsigned gx = 0, mx = 0;
+	if (!gx_vote(48, &gx, &mx)) {		/* RPMH_REGULATOR_LEVEL_MIN_SVS */
+		con_str("GX", "no ARC level for MIN_SVS: stop");
+		return;
+	}
+	/* a6xx_gmu_gfx_rail_on */
+	wr(GMU_REG(GMU_BOOT_SLUMBER_OPTION), 0);
+	wr(GMU_REG(GMU_GX_VOTE_IDX), gx);
+	wr(GMU_REG(GMU_MX_VOTE_IDX), mx);
+	if (!gmu_oob(" oob boot", 22, 30)) {
+		con_str("GX", "no BOOT_SLUMBER ack: stop");
+		return;
+	}
+	/* a6xx_sptprac_enable */
+	wr(GMU_REG(GMU_GX_SPTPRAC_POWER_CONTROL), 0x778000);
+	int sp = 0;
+	for (unsigned i = 0; i < 10 && !sp; i++)
+		sp = wait_bits(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS), 0x38, 0x28);
+	con_hex2(" sptprac", "ok=", sp, "status=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)));
+	/* a6xx_gmu_hfi_start */
+	wr(GMU_REG(GMU_HFI_CTRL_INIT), 1);
+	int hfi = 0;
+	for (unsigned i = 0; i < 5 && !hfi; i++)
+		hfi = wait_bits(GMU_REG(GMU_HFI_CTRL_STATUS), 1, 1);
+	con_hex2(" hfi", "ok=", hfi, "status=", rd(GMU_REG(GMU_HFI_CTRL_STATUS)));
+	gmu_oob(" oob gpu", 16, 24);
+
+	uint32_t st = rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS));
+	con_hex2("GX", "gdscr=", rd(GPUCC + GPUCC_GX_GDSCR), "sptprac=", st);
+	if (st & ((1u << 6) | (1u << 7))) {	/* GX_HM_GDSC_POWER_OFF | GX_HM_CLK_OFF */
+		con_str("GX", "GPU core still off: registers not read");
+		return;
+	}
+	con_hex2(" rbbm", "status=", rd(GPU + RBBM_STATUS * 4), "int0=", rd(GPU + RBBM_INT_0_STATUS * 4));
+	wr(GPU + CP_SCRATCH0 * 4, 0x615c0de5u);
+	uint32_t sc = rd(GPU + CP_SCRATCH0 * 4);
+	con_hex2(" scratch", "wrote=", 0x615c0de5u, "read=", sc);
+	con_str("GX", sc == 0x615c0de5u ? "GPU CORE REGISTERS ALIVE" : "scratch readback differs");
+}
+#endif
+
 static void gmu_boot(void)
 {
 	uint32_t size = (uint32_t)(gmu_fw_end - gmu_fw);
@@ -258,6 +490,13 @@ static void gmu_boot(void)
 	wr(GMU_REG(GMU_SYS_BUS_CONFIG), 1);
 	wr(GMU_REG(GMU_ICACHE_CONFIG), 1);
 	wr(GMU_REG(GMU_DCACHE_CONFIG), 1);
+#ifdef GPU_GX_ON
+	gmu_rpmh_init();
+	hfi_table_init();
+	wr(GMU_REG(GMU_PWR_COL_INTER_FRAME_CTRL), 0x9c40400);	/* idle level: active */
+	wr(GMU_REG(GMU_RPMH_CTRL), rd(GMU_REG(GMU_RPMH_CTRL)) |
+	    (1u << 0) | (1u << 4) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11));
+#endif
 
 	/* a6xx_gmu_start */
 	wr(GMU_REG(GMU_CM3_SYSRESET), 1);
@@ -277,6 +516,10 @@ static void gmu_boot(void)
 	con_hex2(" cb1", "fsr=", rd(GSMMU_CB(GMU_CB) + 0x58), "far=", rd(GSMMU_CB(GMU_CB) + 0x60));
 	con_hex2(" mem", "log0=", *(volatile uint32_t *)(gmu_mem + 0x5000), "hfi0=", *(volatile uint32_t *)(gmu_mem + 0x1000));
 	con_str("GMU", res == 0xbabefaceu ? "FIRMWARE RUNNING" : "no 0xbabeface");
+#ifdef GPU_GX_ON
+	if (res == 0xbabefaceu)
+		gx_on_and_probe();
+#endif
 }
 #endif
 
