@@ -28,6 +28,14 @@
  * HFI_CTRL_INIT, OOB GPU_SET. GPU core (GX) registers are read only if
  * GMU_SPTPRAC_PWR_CLK_STATUS says GX power and clock are on.
  *
+ * t14 (GPU=cp, also -DGPU_CP): GPU stream 0 (exact SMR) into the same
+ * context bank, 64 KiB of GPU memory at iova 0x60100000, then the CP part
+ * of Linux a6xx hw_init: GBIF halts released, secure TSB range off, 64-bit
+ * addressing, UCHE/ROQ/mem pool setup, a630_sqe.fw (minus its first dword,
+ * as adreno_fw_create_bo) as the SQE instructions, a 4 KiB ring, SQE on,
+ * CP_ME_INIT, then CP_MEM_WRITE of 0xc0ffee15 to GPU memory. The GPU stays
+ * in secure mode (no zap shader yet, RBBM_SECVID_TRUST_CNTL untouched).
+ *
  * Register offsets: Linux gcc-sdm845.c (also SDM670), gpucc-sdm845.c and
  * registers/adreno/a6xx_gmu.xml (dword offsets from the GPU base).
  *
@@ -190,6 +198,13 @@ static uint64_t pt_l2[512] __attribute__((aligned(4096)));
 static uint64_t pt_l3[512] __attribute__((aligned(4096)));
 #define GMU_HFI_IOVA	(GMU_IOVA + 0x1000)
 #define GMU_LOG_IOVA	(GMU_IOVA + 0x5000)
+#ifdef GPU_CP
+extern const uint8_t sqe_fw[], sqe_fw_end[];	/* gmufw.S */
+static uint8_t gpu_mem[0x10000] __attribute__((aligned(4096)));
+#define GPU_IOVA	(GMU_IOVA + 0x100000)	/* same L3 table, entries 256.. */
+#define GPU_RING	0x8000			/* offsets in gpu_mem */
+#define GPU_TARGET	0x9000
+#endif
 
 static int gmu_clock_200(void)
 {
@@ -209,6 +224,10 @@ static int gsmmu_map_gmu(void)
 	pt_l2[(GMU_IOVA >> 21) & 511] = (uintptr_t)pt_l3 | 3u;
 	for (unsigned i = 0; i < sizeof(gmu_mem) / 4096; i++)	/* AF, AP=01 (RW), attr 0 */
 		pt_l3[((GMU_IOVA >> 12) & 511) + i] = ((uintptr_t)gmu_mem + i * 4096u) | (1u << 10) | (1u << 6) | 3u;
+#ifdef GPU_CP
+	for (unsigned i = 0; i < sizeof(gpu_mem) / 4096; i++)
+		pt_l3[((GPU_IOVA >> 12) & 511) + i] = ((uintptr_t)gpu_mem + i * 4096u) | (1u << 10) | (1u << 6) | 3u;
+#endif
 	__asm__ volatile("dsb sy" ::: "memory");
 
 	wr(cb + 0x00, 0);				/* SCTLR off while programming */
@@ -235,6 +254,12 @@ static int gsmmu_map_gmu(void)
 	 * (mainline maps only GMU stream 5; downstream also 4), several slots.
 	 */
 	static const struct { uint8_t slot, sid; } try[] = { {0, 5}, {1, 4}, {4, 5}, {3, 4}, {2, 5} };
+#ifdef GPU_CP
+	/* GPU (gfx3d_user) stream 0, exact, slot 2 */
+	wr(GSMMU + 0xc00 + 4 * 2, GMU_CB);
+	wr(GSMMU + 0x800 + 4 * 2, 1u << 31);
+	con_hex2(" smr2", "smr=", rd(GSMMU + 0x808), "s2cr=", rd(GSMMU + 0xc08));
+#endif
 	int have5 = 0, have4 = 0;
 	for (unsigned i = 0; i < sizeof(try) / sizeof(try[0]); i++) {
 		unsigned s = try[i].slot, sid = try[i].sid;
@@ -414,6 +439,101 @@ static int gmu_oob(const char *label, unsigned set, unsigned ack)
 	return ok;
 }
 
+#ifdef GPU_CP
+static void gpu_w(unsigned dw, uint32_t v) { wr(GPU + (uintptr_t)dw * 4u, v); }
+static uint32_t gpu_r(unsigned dw) { return rd(GPU + (uintptr_t)dw * 4u); }
+static void gpu_w64(unsigned dw, uint64_t v) { gpu_w(dw, (uint32_t)v); gpu_w(dw + 1, (uint32_t)(v >> 32)); }
+
+static uint32_t pm4_parity(uint32_t v)
+{
+	return (0x9669u >> (0xfu & (v ^ (v >> 4) ^ (v >> 8) ^ (v >> 12) ^ (v >> 16) ^
+	    (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1u;
+}
+
+static uint32_t pkt7(unsigned op, unsigned cnt)
+{
+	return 0x70000000u | cnt | pm4_parity(cnt) << 15 | (op & 0x7fu) << 16 | pm4_parity(op) << 23;
+}
+
+/* the CP part of Linux a6xx hw_init + a6xx_cp_init + a ring write test */
+static void cp_test(void)
+{
+	uint32_t sqe_size = (uint32_t)(sqe_fw_end - sqe_fw);
+	con_hex2("SQE", "size=", sqe_size, "word1=", ((const uint32_t *)sqe_fw)[1]);
+	if (sqe_size < 8 || sqe_size - 4 > GPU_RING || (sqe_size & 3)) {
+		con_str("SQE", "bad firmware size: stop");
+		return;
+	}
+	gpu_w(0x3c45, 0); (void)gpu_r(0x3c45);		/* GBIF_HALT */
+	gpu_w(0x0016, 0); (void)gpu_r(0x0016);		/* RBBM_GBIF_HALT */
+	gpu_w(0xf803, 0);				/* RBBM_SECVID_TSB_CNTL */
+	gpu_w64(0xf800, 0);				/* TSB_TRUSTED_BASE */
+	gpu_w(0xf802, 0);				/* TSB_TRUSTED_SIZE */
+	static const uint16_t addr_mode[] = { 0x0842, 0x0c01, 0x8601, 0x8e05, 0x9e01, 0xbe05,
+	    0xa601, 0x9601, 0x0e00, 0xae01, 0xb601, 0xf810 };
+	for (unsigned i = 0; i < sizeof(addr_mode) / sizeof(addr_mode[0]); i++)
+		gpu_w(addr_mode[i], 1);			/* 64-bit addressing */
+	gpu_w(0x0010, 3);				/* RBBM_VBIF_CLIENT_QOS_CNTL */
+	uint64_t trap = 0x1fffffffff000ull;
+	gpu_w64(0x0e05, trap + 0xfc0);			/* UCHE_WRITE_RANGE_MAX */
+	gpu_w64(0x0e09, trap);				/* UCHE_TRAP_BASE */
+	gpu_w64(0x0e07, trap);				/* UCHE_WRITE_THRU_BASE */
+	gpu_w64(0x0e0b, 0x100000);			/* UCHE_GMEM_RANGE_MIN */
+	gpu_w64(0x0e0d, 0x100000 + 0x80000 - 1);	/* .. 512 KiB GMEM */
+	gpu_w(0x0e18, 0x804);				/* UCHE_FILTER_CNTL */
+	gpu_w(0x0e17, 0x4);				/* UCHE_CACHE_WAYS */
+	gpu_w(0x08c2, 0x010000c0);			/* CP_ROQ_THRESHOLDS_2 */
+	gpu_w(0x08c1, 0x8040362c);			/* CP_ROQ_THRESHOLDS_1 */
+	gpu_w(0x08c3, 128);				/* CP_MEM_POOL_SIZE */
+	gpu_w(0x098d, 1);				/* CP_AHB_CNTL: AHB error response */
+
+	volatile uint32_t *mem = (volatile uint32_t *)gpu_mem;
+	for (uint32_t i = 0; i < (sqe_size - 4) / 4; i++)
+		mem[i] = ((const uint32_t *)sqe_fw)[i + 1];
+	volatile uint32_t *ring = mem + GPU_RING / 4;
+	for (unsigned i = 0; i < 1024; i++)
+		ring[i] = 0;
+	mem[GPU_TARGET / 4] = 0xdeadbeefu;
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	gpu_w64(0x0830, GPU_IOVA);			/* CP_SQE_INSTR_BASE */
+	gpu_w64(0x0800, GPU_IOVA + GPU_RING);		/* CP_RB_BASE */
+	gpu_w(0x0802, (1u << 27) | (2u << 8) | 9u);	/* CP_RB_CNTL: no rptr update, 32 B blocks, 4 KiB */
+	gpu_w(0x0808, 1);				/* CP_SQE_CNTL: start the SQE */
+
+	unsigned n = 0;
+	ring[n++] = pkt7(0x48, 8);			/* CP_ME_INIT, as a6xx_cp_init */
+	ring[n++] = 0x0000002f;
+	ring[n++] = 0x00000003;
+	ring[n++] = 0x20000000;
+	ring[n++] = 0; ring[n++] = 0; ring[n++] = 0; ring[n++] = 0; ring[n++] = 0;
+	unsigned after_init = n;
+	ring[n++] = pkt7(0x3d, 3);			/* CP_MEM_WRITE */
+	ring[n++] = GPU_IOVA + GPU_TARGET;
+	ring[n++] = 0;
+	ring[n++] = 0xc0ffee15u;
+	__asm__ volatile("dsb sy" ::: "memory");
+	gpu_w(0x0807, n);				/* CP_RB_WPTR */
+
+	uint32_t rptr = 0, got = 0;
+	unsigned ms;
+	for (ms = 0; ms < 200; ms++) {
+		rptr = gpu_r(0x0806);
+		got = mem[GPU_TARGET / 4];
+		if (rptr == n && got == 0xc0ffee15u)
+			break;
+		udelay(1000);
+	}
+	con_hex2("CP", "rptr=", rptr, "wptr=", n);
+	con_hex2(" ring", "init-end=", after_init, "ms=", ms);
+	con_hex2(" target", "value=", got, "rbbm=", gpu_r(RBBM_STATUS));
+	con_hex2(" fault", "cphw=", gpu_r(0x0821), "int0=", gpu_r(RBBM_INT_0_STATUS));
+	con_hex2(" cp", "status1=", gpu_r(0x0825), "trust=", gpu_r(0xf400));
+	con_hex2(" cb1", "fsr=", rd(GSMMU_CB(GMU_CB) + 0x58), "far=", rd(GSMMU_CB(GMU_CB) + 0x60));
+	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
+}
+#endif
+
 static void gx_on_and_probe(void)
 {
 	unsigned gx = 0, mx = 0;
@@ -454,6 +574,10 @@ static void gx_on_and_probe(void)
 	uint32_t sc = rd(GPU + CP_SCRATCH0 * 4);
 	con_hex2(" scratch", "wrote=", 0x615c0de5u, "read=", sc);
 	con_str("GX", sc == 0x615c0de5u ? "GPU CORE REGISTERS ALIVE" : "scratch readback differs");
+#ifdef GPU_CP
+	if (sc == 0x615c0de5u)
+		cp_test();
+#endif
 }
 #endif
 
