@@ -44,7 +44,7 @@ command -v mkbootimg >/dev/null && MKBOOTIMG=mkbootimg || MKBOOTIMG="python3 ../
 [ -n "${GPU:-}" ] && BDEF="$BDEF -DBRINGUP_GPU"
 # GPU=gmu: also boot the GMU (GPU=gx: then GX power through it; GPU=cp: then SQE + ring test; GPU=zap: then the zap shader; GPU=trust: TRUST_CNTL = 0 instead); embeds research/sargo-gpu-fw/a630_gmu.bin (not in git)
 GMUFW=
-if [ "${GPU:-}" = gmu ] || [ "${GPU:-}" = gx ] || [ "${GPU:-}" = cp ] || [ "${GPU:-}" = zap ] || [ "${GPU:-}" = trust ]; then
+if [ "${GPU:-}" = gmu ] || [ "${GPU:-}" = gx ] || [ "${GPU:-}" = cp ] || [ "${GPU:-}" = zap ] || [ "${GPU:-}" = trust ] || [ "${GPU:-}" = blit ]; then
 	# GPUFW=phone: the files pulled from the phone's /vendor/firmware (PQ3B.190801.002; zap re-signed)
 	GMUFW=$(cd .. && pwd)/research/sargo-gpu-fw${GPUFW:+-$GPUFW}/a630_gmu.bin
 	[ -f "$GMUFW" ] || { echo "error: $GMUFW missing (docs/SARGO.md, GPU bring-up)" >&2; exit 1; }
@@ -52,6 +52,7 @@ if [ "${GPU:-}" = gmu ] || [ "${GPU:-}" = gx ] || [ "${GPU:-}" = cp ] || [ "${GP
 	[ "$GPU" = gx ] && BDEF="$BDEF -DGPU_GX_ON"
 	[ "$GPU" = cp ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP"
 	[ "$GPU" = zap ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP -DGPU_ZAP"
+	[ "$GPU" = blit ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP -DGPU_BLIT"
 	[ "${ZAPREGION:-}" = mainline ] && BDEF="$BDEF -DZAP_REGION_MAINLINE"
 	[ "$GPU" = trust ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP -DGPU_TRUST"
 fi

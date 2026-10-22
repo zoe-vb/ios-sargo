@@ -242,6 +242,11 @@ static uint8_t gpu_mem[0x10000] __attribute__((aligned(4096)));
 #define GPU_IOVA	(GMU_IOVA + 0x100000)	/* same L3 table, entries 256.. */
 #define GPU_RING	0x8000			/* offsets in gpu_mem */
 #define GPU_TARGET	0x9000
+#ifdef GPU_BLIT
+#define BLIT_W		64u
+#define BLIT_H		64u
+#define BLIT_TARGET	0xa000u		/* in gpu_mem: 64x64 BGRA */
+#endif
 #endif
 #ifdef GPU_ZAP
 extern const uint8_t zap_mdt[], zap_mdt_end[], zap_b02[], zap_b02_end[];	/* gmufw.S */
@@ -610,6 +615,11 @@ static uint32_t pm4_parity(uint32_t v)
 {
 	return (0x9669u >> (0xfu & (v ^ (v >> 4) ^ (v >> 8) ^ (v >> 12) ^ (v >> 16) ^
 	    (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1u;
+}
+
+static uint32_t pkt4(unsigned reg, unsigned cnt)
+{
+	return 0x40000000u | (cnt & 0x7f) | pm4_parity(cnt) << 7 | (reg & 0x3ffff) << 8 | pm4_parity(reg) << 27;
 }
 
 static uint32_t pkt7(unsigned op, unsigned cnt)
@@ -1142,6 +1152,64 @@ static void cp_test(void)
 	con_str("CP", got == 0xc0ffee15u ? "ME_INIT done, GPU idle" : "CP not idle after ME_INIT");
 #else
 	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
+#endif
+#ifdef GPU_BLIT
+	/*
+	 * t25 workaround: route the GPU secure stream (SID 2) to the same page
+	 * tables as SID 0 (GPU_CB) so render-backend writes in secure mode land
+	 * in normal memory, then a 2D solid fill with secure mode still on (no
+	 * zap). A6XX 2D registers from Mesa tu_clear_blit.cc r2d_*.
+	 */
+	if (got != 0xc0ffee15u)
+		return;
+	wr(GSMMU + 0xc00 + 4 * 3, GPU_CB);
+	wr(GSMMU + 0x800 + 4 * 3, (1u << 31) | 2u);
+	con_hex2("BLIT", "sid2 smr3=", rd(GSMMU + 0x80c), "s2cr3=", rd(GSMMU + 0xc0c));
+	volatile uint32_t *px = (volatile uint32_t *)(gpu_mem + BLIT_TARGET);
+	for (unsigned i = 0; i < BLIT_W * BLIT_H; i++)
+		px[i] = 0xdeadbeefu;
+	uint64_t ts_iova = GPU_IOVA + GPU_TARGET, dst = GPU_IOVA + BLIT_TARGET;
+	mem[GPU_TARGET / 4] = 0;
+	__asm__ volatile("dsb sy" ::: "memory");
+	gpu_w(0x8e07, 0x10000000u);			/* RB_CCU_CNTL */
+	uint32_t blt = (1u << 7) | (0x30u << 8) | (0xfu << 20);	/* solid, FMT6_8888_UNORM, mask */
+	ring[n++] = pkt7(0x65, 1); ring[n++] = (1u << 8) | 12u;	/* CP_SET_MARKER RM6_BLIT2DSCALE */
+	ring[n++] = pkt4(0x8c01, 1); ring[n++] = 0;		/* RB_A2D_PIXEL_CNTL */
+	ring[n++] = pkt4(0x8c00, 1); ring[n++] = blt;		/* RB_A2D_BLT_CNTL */
+	ring[n++] = pkt4(0x8400, 1); ring[n++] = blt;		/* GRAS_A2D_BLT_CNTL */
+	ring[n++] = pkt4(0x8c17, 4); ring[n++] = 0x30u;		/* DEST_BUFFER_INFO fmt, swap WZYX */
+	ring[n++] = (uint32_t)dst; ring[n++] = (uint32_t)(dst >> 32);
+	ring[n++] = (BLIT_W * 4u) >> 6;				/* PITCH shr 6 */
+	ring[n++] = pkt4(0xacc0, 1); ring[n++] = (0x30u << 3) | (0xfu << 12);	/* SP_A2D_OUTPUT_INFO */
+	ring[n++] = pkt4(0x8c2c, 4);				/* RB_A2D_CLEAR_COLOR */
+	ring[n++] = 0x11; ring[n++] = 0x22; ring[n++] = 0x33; ring[n++] = 0x44;
+	ring[n++] = pkt4(0x8405, 2);				/* GRAS_A2D_DEST_TL/BR */
+	ring[n++] = 0;
+	ring[n++] = (BLIT_W - 1u) | ((BLIT_H - 1u) << 16);
+	ring[n++] = pkt7(0x26, 0);				/* CP_WAIT_FOR_IDLE */
+	ring[n++] = pkt7(0x2c, 3);				/* CP_BLIT */
+	ring[n++] = 3u; ring[n++] = 0; ring[n++] = 0;		/* BLIT_OP_SCALE */
+	ring[n++] = pkt7(0x46, 4);				/* CP_EVENT_WRITE CACHE_FLUSH_TS */
+	ring[n++] = 0x04u | (1u << 30);
+	ring[n++] = (uint32_t)ts_iova; ring[n++] = (uint32_t)(ts_iova >> 32);
+	ring[n++] = 0xb1170000u;
+	ring[n++] = pkt7(0x26, 0);				/* CP_WAIT_FOR_IDLE */
+	__asm__ volatile("dsb sy" ::: "memory");
+	gpu_w(0x0807, n);
+	for (ms = 0; ms < 300; ms++) {
+		rptr = gpu_r(0x0806);
+		if (rptr == n && mem[GPU_TARGET / 4] == 0xb1170000u)
+			break;
+		udelay(1000);
+	}
+	con_hex2("BLIT", "rptr=", rptr, "wptr=", n);
+	con_hex2(" done", "ts=", mem[GPU_TARGET / 4], "rbbm=", gpu_r(RBBM_STATUS));
+	con_hex2(" fault", "cphw=", gpu_r(0x0821), "int0=", gpu_r(RBBM_INT_0_STATUS));
+	con_hex2(" cb", "fsr=", rd(GSMMU_CB(GPU_CB) + 0x58), "far=", rd(GSMMU_CB(GPU_CB) + 0x60));
+	con_hex2(" px", "[0]=", px[0], "[last]=", px[BLIT_W * BLIT_H - 1]);
+	con_str("BLIT", px[0] == 0x44332211u ? "GPU RENDERED IN SECURE MODE: pixels in memory" :
+	    px[0] == 0xdeadbeefu ? "nothing written (secure-mode block?)" : "unexpected pixel");
+	return;
 #endif
 #ifdef GPU_ZAP
 	if (got != 0xc0ffee15u)
