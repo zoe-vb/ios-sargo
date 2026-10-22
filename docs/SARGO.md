@@ -284,8 +284,18 @@ SMMU fault) but the destination stayed 0xdeadbeef. **So in secure mode the rende
 normal memory regardless of SMMU routing** (same as ios-sailfish a5xx); only CP_MEM_WRITE lands. GPU rendering
 therefore REQUIRES leaving secure mode, which requires the zap AUTH_AND_RESET, which hangs on this firmware
 (PQ3B) from both the bare shim and XNU despite reproducing all of downstream KGSL's pre-zap setup.
-**GPU bring-up parked here.** Only remaining lead: fastboot-boot a mainline/postmarketOS kernel to confirm
-whether the zap loads on this firmware outside Android (ground truth), then diff its state.
+**GROUND TRUTH (2026-10-22): the zap loads fine under mainline Linux on this firmware.** fastboot-booted the
+postmarketOS sargo boot.img (mainline linux-postmarketos-qcom-sdm670, RAM-only, nothing flashed) with the GPU
+firmware injected into the initramfs (phone's signed a615_zap + upstream a630_sqe.fw, since mainline gates
+sqe >= 0x190 and the phone ships 0x176). After forcing the GPU runtime-active and reading debugfs dri/*/gpu:
+**`revision: 615 (06010500)`, `gpu-initialized: 1`**, no "unable to authorize" error. So mainline's
+a6xx_zap_shader_init -> qcom_scm PAS AUTH_AND_RESET SUCCEEDS from a normal EL1 Linux SMC caller on PQ3B.
+Therefore the wall is NOT the firmware, the zap file, or our GPU programming (all of which we reproduced up to
+AUTH); it is **our SMC/PAS invocation path specifically** (bare shim and XNU both hang in AUTH where Linux
+returns). Next: diff our qcom_scm call sequence against drivers/firmware/qcom/qcom_scm*.c - candidates: the
+SMCCC res/convention, metadata as a dma-coherent (uncached, <4G) buffer vs our carveout, and any SHM-bridge /
+memory-ownership state the hypervisor sets up for Linux PAS buffers that our environment lacks.
+(pmOS test artifacts in ~/Downloads/pmos-sargo-boot, not in git.)
 
 ## Stage plan
 

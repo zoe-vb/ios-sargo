@@ -47,7 +47,11 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   **GPU PARKED (t25, 6bfca03): secure-mode render backend writes nothing even with SID 2 mapped - leaving
   secure mode (zap) is required and its AUTH_AND_RESET hangs on PQ3B firmware. See docs/SARGO.md GPU bring-up.**
   Reusable: shim/gpu.c (GPU=gmu/gx/cp/zap/trust/blit), xnu patch 0089/0090 + tools/gpu2xnu.py, firmware in
-  research/sargo-gpu-fw-phone/. Plan: GLES via Mesa freedreno like
+  research/sargo-gpu-fw-phone/.
+  **KEY FINDING (2026-10-22): mainline Linux (pmOS, RAM-only fastboot boot) loads the zap and fully inits the
+  Adreno 615 on this firmware (debugfs gpu-initialized:1, revision 615). So the zap wall is OUR SMC/PAS caller
+  path, not the firmware/shader/GPU-setup. Reopen the GPU by matching qcom_scm's AUTH_AND_RESET invocation.**
+  Plan: GLES via Mesa freedreno like
   joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
