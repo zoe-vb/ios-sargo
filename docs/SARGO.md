@@ -275,7 +275,10 @@ kgsl_iommu.c ~1160-1300 and downstream arm-smmu secure-domain attach (hyp_assign
 and reproduce them before the zap load. **t22 (a7d5a31, IMG_0077)**: aperture call (MP 0x1b, cb 0) x0=x1=0; SID 2 ->
 CB 1 (SMR3 0x80000002) with an empty table hyp_assigned HLOS -> {HLOS RW, CP_PIXEL R} (MP 0x16, 7 args, x5 = args[3..])
 x0=x1=0; auth still hangs. **t23 (12e99d2)**: .mdt copied into the carveout and INIT_IMAGE given 0x95c15000 as
-downstream pil_boot does (mdata_phys = region_start): still hangs (owner report).
+downstream pil_boot does (mdata_phys = region_start): still hangs (owner report). **t24 (5275483)**: RPMh BCM votes for the crypto
+engine's whole NoC path (CE0, SN10 aggre2, SN0 system NoC; SH0/MC0/ACV carry CPU traffic anyway): still hangs.
+Untested alternative: secure-mode rendering may only need the GPU's secure stream (SID 2) routed to the same page
+tables as SID 0 - ios-sailfish's a5xx secure-mode blits wrote nothing, but it only mapped stream 0.
 
 ## Stage plan
 
