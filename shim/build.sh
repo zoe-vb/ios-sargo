@@ -51,6 +51,7 @@ if [ "${GPU:-}" = gmu ] || [ "${GPU:-}" = gx ] || [ "${GPU:-}" = cp ] || [ "${GP
 	[ "$GPU" = gx ] && BDEF="$BDEF -DGPU_GX_ON"
 	[ "$GPU" = cp ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP"
 	[ "$GPU" = zap ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP -DGPU_ZAP"
+	[ "${ZAPREGION:-}" = mainline ] && BDEF="$BDEF -DZAP_REGION_MAINLINE"
 	[ "$GPU" = trust ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP -DGPU_TRUST"
 fi
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $BDEF"

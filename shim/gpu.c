@@ -245,7 +245,12 @@ static uint8_t gpu_mem[0x10000] __attribute__((aligned(4096)));
 #ifdef GPU_ZAP
 extern const uint8_t zap_mdt[], zap_mdt_end[], zap_b02[], zap_b02_end[];	/* gmufw.S */
 static uint8_t zap_meta[0x2000] __attribute__((aligned(4096)));
-#define ZAP_REGION	0x95c15000UL	/* reserved-memory gpu_region, 8 KiB */
+/* stock (Android 9) DT gpu_region; mainline sdm670-google-common has gpu@97a15000 (ZAPREGION=mainline) */
+#ifdef ZAP_REGION_MAINLINE
+#define ZAP_REGION	0x97a15000UL
+#else
+#define ZAP_REGION	0x95c15000UL
+#endif
 #define ZAP_PAS_ID	13
 #endif
 
@@ -714,6 +719,7 @@ static int zap_load(void)
 	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, (uintptr_t)zap_meta, 0, 0);	/* VAL, RW */
 	int64_t rm = scm(0x0202, 3, ZAP_PAS_ID, ZAP_REGION, 0x1000, 0);
 	con_hex2(" pas", "init=", (uint32_t)ri, "memsetup=", (uint32_t)rm);
+	con_hex2(" pas", "region=", (uint32_t)ZAP_REGION, "pas=", ZAP_PAS_ID);
 	if (ri || rm)
 		return 0;
 	CPDETAIL(con_hex2(" region", "read=", *(volatile uint32_t *)ZAP_REGION, "step=", 1));
