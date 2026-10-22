@@ -362,3 +362,34 @@ shows how far it got (the eMMC dump runs last because it can hang if the SDCC cl
 - Exact `/memory` layout: how much contiguous RAM is above the carve-outs (the iPhone X has 3 GB)?
 - A/B: `userdata` is shared between slots; the iOS root goes there the same way as on sweet,
   **only after** explicit approval (it erases Android user data).
+
+## GPU -> userland plan (2026-10-22, after GPU out of secure mode)
+
+Method = ios-sailfish (Pixel 1, a5xx): kernel msm-style user client + Mesa freedreno (GLES) + libdrm/msm
+shim + EAGL shim injected into backboardd. Author (Joran Vancoillie) has OK'd code reuse (add attribution +
+a LICENSE/NOTICE note when importing). freedreno covers a5xx AND a6xx from one build (picks gen from chip id),
+so the Mesa build and most userland transplant; the GPU-gen-specific kernel bring-up is OURS (sweet_sargo_gpu.c).
+
+**Transplant assessment:** userland ~90% (eagl.c ~as-is; sweet_drm.c change chip id 530->615 + match selectors;
+sweetgl.c as-is; skip the a5xx ir3asm compute shaders - frame-scale optimization only). Kernel user client ~65%
+(IOKit service + UAPI transplant from sailfish 0138/0150; graft onto our a6xx bring-up + submit).
+
+**Kernel user client UAPI (what tools/sweetgl/sweet_drm.c calls via IOConnectCall*):**
+- sel 10 GEM_NEW: scalar in[1]=size -> out=[handle, gpu_iova, ...]; wired buffer, GPU VA, WC user mapping.
+- sel 11 GEM_CLOSE: scalar in[1]=handle.
+- sel 12 import IOSurface: scalar in[1]=surface_id -> out=[handle, gpu_iova].
+- sel 13 GEM_SUBMIT: struct in = 8 + nib*16 + nr_bos*4 bytes (IB list {iova,dwords} + bo handles) -> seqno.
+- sel 14 WAIT_FENCE: scalar in[2]=[seqno, timeout_ms].
+- sel 15 GET_PARAM: scalar out=[chip_id(0x06010500 -> report 615), gmem_size, gmem_base, max_freq].
+- sel 16: scalar in[1] (CPU_FINI/unmap-used).
+
+**Submit (sailfish 0150, transplants onto our ring/emit/pkt7 directly):**
+  for each IB: emit CP_INDIRECT_BUFFER_PFE(0x3f){iova_lo,iova_hi,dwords}; then CP_SET_RENDER_MODE;
+  seq=++g_submit_seq; emit CP_EVENT_WRITE(CACHE_FLUSH_TS){fence_pa_lo,hi,seq}; bump CP_RB_WPTR; return seq.
+  wait: poll the fence page (GPU-written) for (int32)(fence - seqno) >= 0. (We already do CACHE_FLUSH_TS in t14/t25.)
+
+**Milestone 1 (patch 0092): SweetGPU IOKit service + user client.** Promote the probe thread to a persistent
+service that keeps the GPU up (no reset after secure-mode-off); add a GPU-VA bump allocator in the gfx3d_user
+SMMU space, a fence page, GEM_NEW/CLOSE/import, submit (CP_INDIRECT_BUFFER + EVENT_WRITE), wait, GET_PARAM; wrap
+in SweetGPUUserClient::externalMethod (sels 10-16). Test: a tiny user process GEM_NEW + submit a CP_MEM_WRITE IB
++ WAIT_FENCE, confirm the value. Then milestone 2 (sweetgl.dylib) and 3 (backboardd injection + CA_* GLES).
