@@ -14,7 +14,24 @@
  extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
  extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
  extern vm_map_address_t phystokv(uint64_t);
-@@ -314,7 +321,12 @@
+@@ -145,10 +152,13 @@
+ #define DMA_PT2		0x21000
+ #define DMA_PT3		0x22000
+ #define DMA_META	0x24000
+-#define DMA_SIZE	0x28000
+-static uint8_t *gmu_mem, *gpu_mem, *zap_meta;
++#define DMA_SEC		0x26000		/* sec_mem, 0x3000 */
++#define DMA_SIZE	0x2a000
++static uint8_t *gmu_mem, *gpu_mem, *zap_meta, *sec_mem;
+ static uint64_t *pt_l1, *pt_l2, *pt_l3;
+-static uint64_t gmu_mem_pa, gpu_mem_pa, zap_meta_pa, pt_l1_pa, pt_l2_pa, pt_l3_pa;
++static uint64_t gmu_mem_pa, gpu_mem_pa, zap_meta_pa, sec_mem_pa, pt_l1_pa, pt_l2_pa, pt_l3_pa;
++#define SEC_PA(off)	(sec_mem_pa + (off))
++#define SEC_VP(off)	((void *)(sec_mem + (off)))
+ 
+ /* ---- firmware blobs from /chosen/memory-map ---- */
+ static const uint8_t *gmu_fw, *gmu_fw_end, *sqe_fw, *sqe_fw_end;
+@@ -314,7 +324,12 @@
  #define GPU_IOVA	(GMU_IOVA + 0x100000)	/* same L3 table, entries 256.. */
  #define GPU_RING	0x8000			/* offsets in gpu_mem */
  #define GPU_TARGET	0x9000
@@ -27,17 +44,19 @@
  #ifdef GPU_ZAP
  /* stock (Android 9) DT gpu_region; mainline sdm670-google-common has gpu@97a15000 (ZAPREGION=mainline) */
  #ifdef ZAP_REGION_MAINLINE
-@@ -323,6 +335,9 @@
+@@ -323,6 +338,11 @@
  #define ZAP_REGION	0x95c15000UL
  #endif
  #define ZAP_PAS_ID	13
-+/* t22: secure context bank page table + hyp_assign / SCM argument buffers */
-+static uint8_t sec_mem[0x3000] __attribute__((aligned(4096)));
++/* t22: secure context bank page table + hyp_assign / SCM argument buffers.
++ * SEC_PA/SEC_VP: physical address (for TZ/SMMU) and CPU pointer at an offset.
++ * In the shim (MMU off) they are the same; gpu2xnu.py maps sec_mem into the
++ * DMA block and redefines these for XNU. */
 +#define SEC_CB		1
  #endif
  
  static int gmu_clock_200(void)
-@@ -679,6 +694,11 @@
+@@ -679,6 +699,11 @@
  	    (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1u;
  }
  
@@ -49,7 +68,7 @@
  static uint32_t pkt7(unsigned op, unsigned cnt)
  {
  	return 0x70000000u | cnt | pm4_parity(cnt) << 15 | (op & 0x7fu) << 16 | pm4_parity(op) << 23;
-@@ -686,28 +706,57 @@
+@@ -686,28 +711,57 @@
  
  #ifdef GPU_ZAP
  /* qcom_scm SMCCC convention: SIP, SMC64, standard call; x0 status, x1 result */
@@ -117,7 +136,7 @@
  	if (res)
  		*res = x1;
  	return (int64_t)x0;
-@@ -765,6 +814,88 @@
+@@ -765,6 +819,88 @@
  	wr(RSC_TCS + 0x00, irq_en);
  	con_hex2(" bcm", "addr=", addr, "status=", st);
  	return st;
@@ -163,8 +182,8 @@
 +	con_hex2(" aperture", "x0=", (uint32_t)ra, "x1=", (uint32_t)x1);
 +
 +	for (unsigned i = 0; i < sizeof(sec_mem); i++)
-+		sec_mem[i] = 0;
-+	uint64_t l1 = (uintptr_t)sec_mem;		/* empty table: every secure access faults */
++		((uint8_t *)SEC_VP(0))[i] = 0;
++	uint64_t l1 = SEC_PA(0);			/* empty table: every secure access faults */
 +	uintptr_t cb = GSMMU_CB(SEC_CB);
 +	wr(cb + 0x00, 0);
 +	wr(GSMMU_GR1 + 0x800 + 4 * SEC_CB, 1u);	/* AArch64 */
@@ -185,28 +204,28 @@
 +	con_hex2(" sec sid2", "smr3=", rd(GSMMU + 0x80c), "s2cr3=", rd(GSMMU + 0xc0c));
 +
 +	/* hyp_assign_phys(l1, 4K, {HLOS} -> {HLOS RW, CP_PIXEL R}) */
-+	uint64_t *info = (uint64_t *)(sec_mem + 0x1000);	/* struct mem_prot_info */
-+	uint32_t *src = (uint32_t *)(sec_mem + 0x1100);
-+	uint32_t *dst = (uint32_t *)(sec_mem + 0x1200);	/* 2 x struct dest_vm_and_perm_info (24 B) */
-+	uint64_t *ext = (uint64_t *)(sec_mem + 0x2000);	/* args[3..9] */
++	uint64_t *info = (uint64_t *)SEC_VP(0x1000);	/* struct mem_prot_info */
++	uint32_t *src = (uint32_t *)SEC_VP(0x1100);
++	uint32_t *dst = (uint32_t *)SEC_VP(0x1200);	/* 2 x struct dest_vm_and_perm_info (24 B) */
++	uint64_t *ext = (uint64_t *)SEC_VP(0x2000);	/* args[3..9] */
 +	info[0] = l1;
 +	info[1] = 0x1000;
 +	src[0] = 3;					/* VMID_HLOS */
 +	dst[0] = 3;   dst[1] = 4 | 2;			/* HLOS: read, write */
 +	dst[6] = 0xa; dst[7] = 4;			/* VMID_CP_PIXEL: read */
 +	ext[0] = 4;					/* source list size */
-+	ext[1] = (uintptr_t)dst;
++	ext[1] = SEC_PA(0x1200);			/* phys of dst */
 +	ext[2] = 48;					/* dest list size */
 +	ext[3] = 0;
 +	__asm__ volatile("dsb sy" ::: "memory");
 +	x1 = 0xdead;
 +	int64_t rh = scm5(0x0c16, 7 | (1u << 4) | (1u << 8) | (1u << 12),	/* RO, VAL, RO, VAL, RO, VAL, VAL */
-+	    (uintptr_t)info, 16, (uintptr_t)src, (uintptr_t)ext, &x1);
++	    SEC_PA(0x1000), 16, SEC_PA(0x1100), SEC_PA(0x2000), &x1);
 +	con_hex2(" hypassign", "x0=", (uint32_t)rh, "x1=", (uint32_t)x1);
  }
  
  /* Linux qcom_mdt_load + qcom_scm_pas_auth_and_reset for the a615 zap shader */
-@@ -781,6 +912,20 @@
+@@ -781,6 +917,20 @@
  	}
  	for (uint32_t i = 0; i < mdt_size; i++)
  		zap_meta[i] = zap_mdt[i];
@@ -227,7 +246,7 @@
  	__asm__ volatile("dsb sy" ::: "memory");
  	/*
  	 * t15 (IMG_0068) hung after INIT_IMAGE/MEM_SETUP returned 0, with no
-@@ -793,7 +938,7 @@
+@@ -793,7 +943,7 @@
  	 * t15..t17b only checked x0. Show both and stop on either.
  	 */
  	uint64_t ri1 = 0xdead, rm1 = 0xdead;
@@ -236,7 +255,7 @@
  	con_hex2(" init", "x0=", (uint32_t)ri, "x1=", (uint32_t)ri1);
  	if (ri || ri1) {
  		con_str("ZAP", "INIT_IMAGE refused (x1): auth not attempted");
-@@ -826,6 +971,14 @@
+@@ -826,6 +976,14 @@
  	CPDETAIL(con_hex2(" gx", "sptprac=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)), "trust=", rd(GPU + 0xf400 * 4)));
  	rpmh_bcm_vote("CE0", (1u << 30) | (1u << 29) | (1u << 14) | 1u);	/* commit, valid, x=1, y=1 */
  	/*
@@ -251,7 +270,7 @@
  	 * t21: Linux makes this call with IRQs enabled and services them; the
  	 * shim runs masked with no handler, and t17+ enabled the GPU's
  	 * interrupts. Show what is pending, then quiesce every source the shim
-@@ -835,9 +988,9 @@
+@@ -835,9 +993,9 @@
  	__asm__ volatile("mrs %0, isr_el1" : "=r"(isr));
  	__asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(cntp));
  	__asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(cntv));
@@ -264,7 +283,7 @@
  	/* (the shim also switched the EL1 timers off here; XNU needs them) */
  	gpu_w(0x0038, 0);				/* RBBM_INT_0_MASK */
  	wr(GMU_REG(0x23b06), 0xffffffffu);		/* GMU_AO_HOST_INTERRUPT_MASK */
-@@ -851,7 +1004,9 @@
+@@ -851,7 +1009,9 @@
  	con_hex2(" quiet", "isr=", (uint32_t)isr, "spi pend=", rd(0x17a00000UL + 0x224));
  	con_str(" pas", "AUTH_AND_RESET...");
  	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
@@ -275,7 +294,7 @@
  	return rr == 0;
  }
  #endif
-@@ -1058,14 +1213,13 @@
+@@ -1058,14 +1218,13 @@
  	gpu_w(0x0802, (1u << 27) | (2u << 8) | 9u);	/* CP_RB_CNTL: no rptr update, 32 B blocks, 4 KiB */
  #ifdef GPU_ZAP
  	/*
@@ -296,7 +315,7 @@
  #endif
  	gpu_w(0x0808, 1);				/* CP_SQE_CNTL: start the SQE */
  
-@@ -1109,9 +1263,89 @@
+@@ -1109,9 +1268,89 @@
  #else
  	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
  #endif
@@ -386,3 +405,11 @@
  	unsigned start = n;
  	ring[n++] = pkt7(0x66, 1);			/* CP_SET_SECURE_MODE */
  	ring[n++] = 0;
+@@ -1395,6 +1634,7 @@
+ 	pt_l2 = (uint64_t *)(wc + DMA_PT2); pt_l2_pa = pa + DMA_PT2;
+ 	pt_l3 = (uint64_t *)(wc + DMA_PT3); pt_l3_pa = pa + DMA_PT3;
+ 	zap_meta = wc + DMA_META;      zap_meta_pa = pa + DMA_META;
++	sec_mem = wc + DMA_SEC;        sec_mem_pa = pa + DMA_SEC;
+ 	printf("SWEET GPU: DMA %#llx (%#x bytes), firmware gmu %ld sqe %ld mdt %ld b02 %ld\n",
+ 	    pa, DMA_SIZE, (long)(gmu_fw_end - gmu_fw), (long)(sqe_fw_end - sqe_fw),
+ 	    (long)(zap_mdt_end - zap_mdt), (long)(zap_b02_end - zap_b02));

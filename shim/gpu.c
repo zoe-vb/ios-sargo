@@ -258,8 +258,15 @@ static uint8_t zap_meta[0x2000] __attribute__((aligned(4096)));
 #define ZAP_REGION	0x95c15000UL
 #endif
 #define ZAP_PAS_ID	13
-/* t22: secure context bank page table + hyp_assign / SCM argument buffers */
+/* t22: secure context bank page table + hyp_assign / SCM argument buffers.
+ * SEC_PA/SEC_VP: physical address (for TZ/SMMU) and CPU pointer at an offset.
+ * In the shim (MMU off) they are the same; gpu2xnu.py maps sec_mem into the
+ * DMA block and redefines these for XNU. */
 static uint8_t sec_mem[0x3000] __attribute__((aligned(4096)));
+#ifndef SEC_PA
+#define SEC_PA(off)	((uintptr_t)(sec_mem + (off)))
+#define SEC_VP(off)	((void *)(sec_mem + (off)))
+#endif
 #define SEC_CB		1
 #endif
 
@@ -779,8 +786,8 @@ static void secure_context(void)
 	con_hex2(" aperture", "x0=", (uint32_t)ra, "x1=", (uint32_t)x1);
 
 	for (unsigned i = 0; i < sizeof(sec_mem); i++)
-		sec_mem[i] = 0;
-	uint64_t l1 = (uintptr_t)sec_mem;		/* empty table: every secure access faults */
+		((uint8_t *)SEC_VP(0))[i] = 0;
+	uint64_t l1 = SEC_PA(0);			/* empty table: every secure access faults */
 	uintptr_t cb = GSMMU_CB(SEC_CB);
 	wr(cb + 0x00, 0);
 	wr(GSMMU_GR1 + 0x800 + 4 * SEC_CB, 1u);	/* AArch64 */
@@ -801,23 +808,23 @@ static void secure_context(void)
 	con_hex2(" sec sid2", "smr3=", rd(GSMMU + 0x80c), "s2cr3=", rd(GSMMU + 0xc0c));
 
 	/* hyp_assign_phys(l1, 4K, {HLOS} -> {HLOS RW, CP_PIXEL R}) */
-	uint64_t *info = (uint64_t *)(sec_mem + 0x1000);	/* struct mem_prot_info */
-	uint32_t *src = (uint32_t *)(sec_mem + 0x1100);
-	uint32_t *dst = (uint32_t *)(sec_mem + 0x1200);	/* 2 x struct dest_vm_and_perm_info (24 B) */
-	uint64_t *ext = (uint64_t *)(sec_mem + 0x2000);	/* args[3..9] */
+	uint64_t *info = (uint64_t *)SEC_VP(0x1000);	/* struct mem_prot_info */
+	uint32_t *src = (uint32_t *)SEC_VP(0x1100);
+	uint32_t *dst = (uint32_t *)SEC_VP(0x1200);	/* 2 x struct dest_vm_and_perm_info (24 B) */
+	uint64_t *ext = (uint64_t *)SEC_VP(0x2000);	/* args[3..9] */
 	info[0] = l1;
 	info[1] = 0x1000;
 	src[0] = 3;					/* VMID_HLOS */
 	dst[0] = 3;   dst[1] = 4 | 2;			/* HLOS: read, write */
 	dst[6] = 0xa; dst[7] = 4;			/* VMID_CP_PIXEL: read */
 	ext[0] = 4;					/* source list size */
-	ext[1] = (uintptr_t)dst;
+	ext[1] = SEC_PA(0x1200);			/* phys of dst */
 	ext[2] = 48;					/* dest list size */
 	ext[3] = 0;
 	__asm__ volatile("dsb sy" ::: "memory");
 	x1 = 0xdead;
 	int64_t rh = scm5(0x0c16, 7 | (1u << 4) | (1u << 8) | (1u << 12),	/* RO, VAL, RO, VAL, RO, VAL, VAL */
-	    (uintptr_t)info, 16, (uintptr_t)src, (uintptr_t)ext, &x1);
+	    SEC_PA(0x1000), 16, SEC_PA(0x1100), SEC_PA(0x2000), &x1);
 	con_hex2(" hypassign", "x0=", (uint32_t)rh, "x1=", (uint32_t)x1);
 }
 
