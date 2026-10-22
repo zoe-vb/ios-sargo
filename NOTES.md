@@ -35,7 +35,8 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   build time, never in git). Details + next steps: docs/SARGO.md "GPU bring-up". Key lesson: the GPU SMMU's
   firmware drops masked SMRs; exact single-stream SMRs stick. **t13 (4720096): GX powered through the GMU,
   GPU core registers read/write (CP scratch readback OK). t14b (58d64b8): RING TEST PASSED - CP ran SQE fw,
-  CP_ME_INIT + CP_MEM_WRITE wrote 0xc0ffee15 (still secure mode, no zap yet).** Plan: GLES via Mesa freedreno like
+  CP_ME_INIT + CP_MEM_WRITE wrote 0xc0ffee15 (still secure mode, no zap yet).** Zap shader (t15-t15d): TZ
+  AUTH_AND_RESET hangs the phone; GMU shows CM3_FAULT after OOB GPU_SET since t14 - see docs/SARGO.md. Plan: GLES via Mesa freedreno like
   joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the

@@ -225,6 +225,14 @@ CP_HW_FAULT 0, RBBM_INT_0 0, CP_STATUS_1 0x01000000, RBBM_SECVID_TRUST_CNTL 1 (s
 ios-sailfish saw on a5xx), CB 1 FSR 0x400 (no fault). OOB GPU_SET again unacked (g2h 0x00800000).
 Next: zap shader via TZ (qcom_scm PAS init/mem/auth for PAS 13 from a615_zap.mdt/.b0x) and
 CP_SET_SECURE_MODE 0; then move the bring-up into XNU (SweetGPU + msm-style user client, as ios-sailfish).
+**Zap shader (t15..t15d, 2026-10-22):** TZ answers IS_CALL_AVAIL(INIT_IMAGE) = 1 but PAS_IS_SUPPORTED(13) = 0;
+INIT_IMAGE (.mdt as metadata) and MEM_SETUP (0x95c15000, 0x1000) return 0; the .b02 copy into gpu_region
+works (it still held the segment after a warm reset); **AUTH_AND_RESET never returns** (no exception, hard
+hang, manual fastboot). Not the cause: CB choice (t15c: GPU CB 0, GMU CB 3, CBs 1/2 untouched) or
+INTERRUPTED resume. Lead: since t14 the GMU **crashes** after the OOB GPU_SET request (GMU2HOST_INTR_INFO
+0x00800000 = bit 23 CM3_FAULT, no ack; t13 - much slower console output between steps - got the ack 0x01000000).
+Linux sends HFI v1 GMU_INIT, FW_VERSION, PERF_TABLE, BW_TABLE before GPU_SET; we send none. t15d (3d6efd0):
+50 ms pacing + GMU state before GPU_SET (result pending).
 
 ## Stage plan
 
