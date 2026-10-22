@@ -8,8 +8,8 @@
  *
  * Writes only: GCC clock vote/RCG, TLMM pin config, GENI and GPI (GPII 1)
  * registers, and on the touch IC the RMI4 page select register (0xff = 0).
- * No PMIC writes: if the IC does not answer, its 1.8 V (PM660 GPIO 12) is
- * probably off.
+ * TOUCH=bb also drives PM660 GPIO 12 high over SPMI (the IC's 1.8 V
+ * switch, left off by ABL: t08 read SDA/SCL low with pull-ups on).
  *
  * MMU off: aligned 32-bit accesses only (Device memory).
  */
@@ -770,6 +770,117 @@ static void hexline(const char *label, const uint8_t *b, unsigned n)
 	con_str(label, s);
 }
 
+/*
+ * PMIC arbiter v5 (SPMI 0xc440000): touch 1.8 V = PM660 (SID 0) GPIO 12,
+ * peripheral 0xcb (base 0xcb00). Reads go through the EE0 observer
+ * channel, writes through the APID's RW channel, as in Linux
+ * spmi-pmic-arb.c. Only GPIO 12's own registers are written, and only
+ * after its TYPE register reads back 0x10 (GPIO) and the APID is owned
+ * by the apps EE.
+ */
+#define SPMI_CORE	0x0c440000UL
+#define SPMI_CHNLS	0x0c600000UL
+#define SPMI_OBS	0x0e600000UL
+#define SPMI_CNFG	0x0c40a000UL
+#define TS_PPID		0x0cbu		/* SID 0, peripheral 0xcb */
+#define SPMI_NONE	0xffffu
+
+static int spmi_cmd(uintptr_t ch, uint32_t cmd, uint32_t *status)
+{
+	wr(ch, cmd);
+	for (unsigned i = 0; i < 1000; i++) {
+		uint32_t s = rd(ch + 0x08);
+		if (s & 1u) {
+			*status = s;
+			return (s & 0x0eu) ? -1 : 0;
+		}
+		udelay(1);
+	}
+	*status = 0xdead;
+	return -1;
+}
+
+static int spmi_rd(unsigned apid, uint8_t reg, uint8_t *v)
+{
+	uintptr_t ch = SPMI_OBS + 0x80u * apid;
+	uint32_t s;
+	if (spmi_cmd(ch, (1u << 27) | ((uint32_t)reg << 4), &s))	/* EXT_READL */
+		return -1;
+	*v = (uint8_t)rd(ch + 0x18);
+	return 0;
+}
+
+static int spmi_wr(unsigned apid, uint8_t reg, uint8_t v)
+{
+	uintptr_t ch = SPMI_CHNLS + 0x10000u * apid;
+	uint32_t s;
+	wr(ch + 0x10, v);
+	if (spmi_cmd(ch, ((uint32_t)reg << 4), &s)) {			/* EXT_WRITEL */
+		con_hex2("SPMI wr", "reg=", reg, "st=", s);
+		return -1;
+	}
+	return 0;
+}
+
+static unsigned spmi_apid(unsigned ppid, uint32_t *owner)
+{
+	uint32_t n = rd(SPMI_CORE + 4) & 0x7ffu;
+	unsigned found = SPMI_NONE;
+	for (uint32_t i = 0; i < n && i < 512; i++) {
+		uint32_t map = rd(SPMI_CORE + 0x900 + 4 * i);
+		if (!map || ((map >> 8) & 0xfffu) != ppid)
+			continue;
+		uint32_t o = rd(SPMI_CNFG + 0x700 + 4 * i) & 7u;
+		if (found == SPMI_NONE || o == 0) {
+			found = i;
+			*owner = o;
+		}
+	}
+	return found;
+}
+
+static void ts_gpio_dump(unsigned apid, const char *label)
+{
+	uint8_t st = 0, mode = 0, src = 0, en = 0;
+	spmi_rd(apid, 0x08, &st);
+	spmi_rd(apid, 0x40, &mode);
+	spmi_rd(apid, 0x44, &src);
+	spmi_rd(apid, 0x46, &en);
+	con_hex2(label, "st/mode=", (uint32_t)st << 8 | mode, "src/en=", (uint32_t)src << 8 | en);
+}
+
+/* PM660 GPIO 12 -> output high (digital, constant source, inverted) */
+static int ts_power_on(void)
+{
+	uint32_t ver = rd(SPMI_CORE), owner = 7;
+	unsigned apid = spmi_apid(TS_PPID, &owner);
+	con_hex2("SPMI", "ver=", ver, "apid/own=", apid << 8 | owner);
+	if (ver < 0x50000000u || ver >= 0x70000000u || apid == SPMI_NONE)
+		return 0;
+	uint8_t type = 0, sub = 0;
+	if (spmi_rd(apid, 0x04, &type) || spmi_rd(apid, 0x05, &sub) || type != 0x10) {
+		con_hex2("PMGPIO12", "type=", type, "sub=", sub);
+		return 0;
+	}
+	con_hex2("PMGPIO12", "type=", type, "sub=", sub);
+	ts_gpio_dump(apid, " before");
+	if (owner != 0) {
+		con_str("PMGPIO12", "not owned by apps EE: no write");
+		return 0;
+	}
+	int lvmv = sub >= 0x10;
+	int err = 0;
+	if (lvmv) {
+		err |= spmi_wr(apid, 0x40, 0x01);	/* mode: digital out */
+		err |= spmi_wr(apid, 0x44, 0x80);	/* invert, source 0 = high */
+	} else {
+		err |= spmi_wr(apid, 0x40, 0x11);	/* mode out, func 0, invert */
+	}
+	err |= spmi_wr(apid, 0x46, 0x80);		/* enable */
+	ts_gpio_dump(apid, " after");
+	return !err;
+}
+
 void test_touch(void)
 {
 	con_str("TOUCH", "RMI4 0x20 on i2c9 (SE @ A84000)");
@@ -787,9 +898,18 @@ void test_touch(void)
 #endif
 	con_hex2("TLMM", "rst=", rd(GPIO_CFG(PIN_RESET)), "irq=", rd(GPIO_CFG(PIN_IRQ)));
 	con_hex2(" i2c", "sda=", rd(GPIO_CFG(PIN_SDA)), "scl=", rd(GPIO_CFG(PIN_SCL)));
+#ifdef TOUCH_BB
+	if (!ts_power_on())
+		return;
+	mdelay(20);
+#endif
 	gpio(PIN_IRQ, 0, 3, 1, 0, 0);		/* input, pull-up */
 #ifdef TOUCH_BB
 	bb_bus_init();				/* gpio6/7 as plain GPIOs */
+	if (!bb_read(PIN_SDA) || !bb_read(PIN_SCL)) {
+		con_str("TOUCH", "SDA/SCL still low: bus unpowered, no probe");
+		return;
+	}
 #else
 	gpio(PIN_SDA, 1, 0, 0, 0, 0);		/* qup9, 2 mA, no pull */
 	gpio(PIN_SCL, 1, 0, 0, 0, 0);
