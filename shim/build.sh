@@ -45,7 +45,8 @@ command -v mkbootimg >/dev/null && MKBOOTIMG=mkbootimg || MKBOOTIMG="python3 ../
 # GPU=gmu: also boot the GMU (GPU=gx: then GX power through it; GPU=cp: then SQE + ring test; GPU=zap: then the zap shader; GPU=trust: TRUST_CNTL = 0 instead); embeds research/sargo-gpu-fw/a630_gmu.bin (not in git)
 GMUFW=
 if [ "${GPU:-}" = gmu ] || [ "${GPU:-}" = gx ] || [ "${GPU:-}" = cp ] || [ "${GPU:-}" = zap ] || [ "${GPU:-}" = trust ]; then
-	GMUFW=$(cd .. && pwd)/research/sargo-gpu-fw/a630_gmu.bin
+	# GPUFW=phone: the files pulled from the phone's /vendor/firmware (PQ3B.190801.002; zap re-signed)
+	GMUFW=$(cd .. && pwd)/research/sargo-gpu-fw${GPUFW:+-$GPUFW}/a630_gmu.bin
 	[ -f "$GMUFW" ] || { echo "error: $GMUFW missing (docs/SARGO.md, GPU bring-up)" >&2; exit 1; }
 	BDEF="$BDEF -DGPU_GMU_BOOT"
 	[ "$GPU" = gx ] && BDEF="$BDEF -DGPU_GX_ON"
