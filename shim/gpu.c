@@ -1117,15 +1117,13 @@ static void cp_test(void)
 	gpu_w(0x0802, (1u << 27) | (2u << 8) | 9u);	/* CP_RB_CNTL: no rptr update, 32 B blocks, 4 KiB */
 #ifdef GPU_ZAP
 	/*
-	 * t19: downstream KGSL (the driver this TZ shipped with) loads the zap
-	 * in a6xx_microcode_load, after CP_SQE_INSTR_BASE and before the SQE is
-	 * started; mainline does it after CP_ME_INIT. t15..t18 used mainline's
-	 * order and AUTH_AND_RESET never returned. Use downstream's.
+	 * t26: auth works (x7=0). t19 loaded the zap before the SQE started and
+	 * the GPU hung on the first register access after AUTH_AND_RESET's reset.
+	 * Mainline order: set up the secure IOMMU context now, start the SQE and
+	 * CP_ME_INIT, then load the zap and push CP_SET_SECURE_MODE through the
+	 * already-running ring (no GPU-register poking across the reset).
 	 */
 	secure_context();
-	int zap_ok = zap_load();
-	if (!zap_ok)
-		return;
 #endif
 	gpu_w(0x0808, 1);				/* CP_SQE_CNTL: start the SQE */
 
@@ -1229,6 +1227,8 @@ static void cp_test(void)
 #endif
 #ifdef GPU_ZAP
 	if (got != 0xc0ffee15u)
+		return;
+	if (!zap_load())				/* auth the zap on the running CP */
 		return;
 	unsigned start = n;
 	ring[n++] = pkt7(0x66, 1);			/* CP_SET_SECURE_MODE */
