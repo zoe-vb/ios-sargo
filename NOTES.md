@@ -9,9 +9,14 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   PAGE0 "ACK" was SDA stuck low (fake). **t09** (`498f38a`, `shim/out/sargo/shim-boot-t09.img`): first PMIC
   write - PM660 GPIO 12 (PPID 0x0cb, ts_1p8 vio) to output high via SPMI arb v5 RW channel (0xc600000 +
   0x10000*apid), guarded by TYPE=0x10 + apps ownership; refuses to probe while SDA/SCL low. **t09 booted
-  2026-10-22: user reports live touch readings** (photo with F01 id / F12 query bytes not yet seen).
-  Next: decode F12 report layout from a photo, then XNU driver (SPMI GPIO12 on + bit-bang or GENI-in-FIFO
-  I2C, feeding sweet_hid_touch; SweetHID height from boot FB, 2220 not 2400).
+  2026-10-22: live touch works** (IMG_0059): SPMI arb 0x50000000, GPIO 12 apid 0x4c owner 0, subtype 0x10,
+  after = mode 1 / src 0x80 / en 0x80. IC = S3706B; PDT F34 (q24 c0c d00), F01 (q2c c0d d06 cmd23),
+  F12 (q4b c13 d08). F12 object 0 at data 0x08: `01 44 02 e6 06 51 06 06` = finger, x 0x244, y 0x6e6
+  (thumb lower middle) -> panel pixels, no flip/scale. **XNU patch 0087** (`816d668`, pushed to
+  sargo/main -> CI): bsd/dev/sweet_sargo_touch.c (same power-on + ~200 kHz bit-bang, 10 ms poll, 5
+  fingers, started from sweet_sdhc_init, boot-arg sargotouch=0 off) + SweetHID panel size from
+  PE_current_console (2220 -> offset 108 in 1125x2436). Next: download the 0087 kernel ->
+  `xnu-kernel-0087/`, build x19 = x18 config with it, boot, unlock test. Not hardware-tested in XNU yet.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
