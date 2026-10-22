@@ -253,6 +253,9 @@ static uint8_t zap_meta[0x2000] __attribute__((aligned(4096)));
 #define ZAP_REGION	0x95c15000UL
 #endif
 #define ZAP_PAS_ID	13
+/* t22: secure context bank page table + hyp_assign / SCM argument buffers */
+static uint8_t sec_mem[0x3000] __attribute__((aligned(4096)));
+#define SEC_CB		1
 #endif
 
 static int gmu_clock_200(void)
@@ -697,6 +700,84 @@ static uint32_t rpmh_bcm_vote(const char *id, uint32_t data)
 	return st;
 }
 
+/* scm() with a fourth argument in x5 (downstream scm_call2: args[3], or the extra-args buffer) */
+static int64_t scm5(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2,
+    uint64_t a3, uint64_t *res)
+{
+	register uint64_t x0 __asm__("x0"), x1 __asm__("x1"), x2 __asm__("x2"), x3 __asm__("x3");
+	register uint64_t x4 __asm__("x4"), x5 __asm__("x5"), x6 __asm__("x6");
+	uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
+	do {
+		x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = a3; x6 = sess;
+		__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
+		    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+		fn = 1;
+		sess = x6;
+	} while (x0 == 1);
+	if (res)
+		*res = x1;
+	return (int64_t)x0;
+}
+
+/*
+ * t22: downstream KGSL (android-msm-bonito-4.9-pie-qpr3-b, the PQ3B kernel)
+ * only loads the zap when the IOMMU has a secure context (mmu.secured), and
+ * before that: kgsl_iommu _init_global_pt -> program_smmu_aperture(user cb,
+ * CP_APERTURE_REG 0) = TZ MP 0x1b; _init_secure_pt -> gfx3d_secure (SID 2)
+ * on its own bank with DOMAIN_ATTR_SECURE_VMID = VMID_CP_PIXEL, whose page
+ * tables arm-smmu hyp_assigns from HLOS to {HLOS RW, CP_PIXEL R}
+ * (arm_smmu_assign_table, MEM_PROT_ASSIGN = MP 0x16). Do both.
+ */
+static void secure_context(void)
+{
+	uint64_t x1 = 0xdead;
+	int64_t ra = scm5(0x0c1b, 4, 0xffff0000u | (0u << 8) | GPU_CB, 0xffffffffu, 0xffffffffu,
+	    0xffffffffu, &x1);
+	con_hex2(" aperture", "x0=", (uint32_t)ra, "x1=", (uint32_t)x1);
+
+	for (unsigned i = 0; i < sizeof(sec_mem); i++)
+		sec_mem[i] = 0;
+	uint64_t l1 = (uintptr_t)sec_mem;		/* empty table: every secure access faults */
+	uintptr_t cb = GSMMU_CB(SEC_CB);
+	wr(cb + 0x00, 0);
+	wr(GSMMU_GR1 + 0x800 + 4 * SEC_CB, 1u);	/* AArch64 */
+	wr(GSMMU_GR1 + 4 * SEC_CB, 1u << 16);		/* S1 translate, S2 bypass */
+	wr(cb + 0x10, 2u);
+	wr(cb + 0x20, (uint32_t)l1);
+	wr(cb + 0x24, (uint32_t)(l1 >> 32));
+	wr(cb + 0x30, 32u | (1u << 23));
+	wr(cb + 0x38, 0x44u);
+	wr(cb + 0x3c, 0);
+	wr(cb + 0x58, 0xffffffffu);
+	wr(cb + 0x618, 0);
+	wr(cb + 0x7f0, 0);
+	wait_bits(cb + 0x7f4, 1u, 0);
+	wr(cb + 0x00, 0x67u);
+	wr(GSMMU + 0xc00 + 4 * 3, SEC_CB);		/* SMR 3: SID 2 (gfx3d_secure), exact */
+	wr(GSMMU + 0x800 + 4 * 3, (1u << 31) | 2u);
+	con_hex2(" sec sid2", "smr3=", rd(GSMMU + 0x80c), "s2cr3=", rd(GSMMU + 0xc0c));
+
+	/* hyp_assign_phys(l1, 4K, {HLOS} -> {HLOS RW, CP_PIXEL R}) */
+	uint64_t *info = (uint64_t *)(sec_mem + 0x1000);	/* struct mem_prot_info */
+	uint32_t *src = (uint32_t *)(sec_mem + 0x1100);
+	uint32_t *dst = (uint32_t *)(sec_mem + 0x1200);	/* 2 x struct dest_vm_and_perm_info (24 B) */
+	uint64_t *ext = (uint64_t *)(sec_mem + 0x2000);	/* args[3..9] */
+	info[0] = l1;
+	info[1] = 0x1000;
+	src[0] = 3;					/* VMID_HLOS */
+	dst[0] = 3;   dst[1] = 4 | 2;			/* HLOS: read, write */
+	dst[6] = 0xa; dst[7] = 4;			/* VMID_CP_PIXEL: read */
+	ext[0] = 4;					/* source list size */
+	ext[1] = (uintptr_t)dst;
+	ext[2] = 48;					/* dest list size */
+	ext[3] = 0;
+	__asm__ volatile("dsb sy" ::: "memory");
+	x1 = 0xdead;
+	int64_t rh = scm5(0x0c16, 7 | (1u << 4) | (1u << 8) | (1u << 12),	/* RO, VAL, RO, VAL, RO, VAL, VAL */
+	    (uintptr_t)info, 16, (uintptr_t)src, (uintptr_t)ext, &x1);
+	con_hex2(" hypassign", "x0=", (uint32_t)rh, "x1=", (uint32_t)x1);
+}
+
 /* Linux qcom_mdt_load + qcom_scm_pas_auth_and_reset for the a615 zap shader */
 static int zap_load(void)
 {
@@ -766,8 +847,8 @@ static int zap_load(void)
 	__asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(cntp));
 	__asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(cntv));
 	con_hex2(" irq", "isr=", (uint32_t)isr, "cntp/v=", (uint32_t)(cntp << 16 | cntv));
-	con_hex2(" gicr0", "pend=", rd(0x17a60000UL + 0x10200), "en=", rd(0x17a60000UL + 0x10100));
-	con_hex2(" spi288", "pend=", rd(0x17a00000UL + 0x224), "en=", rd(0x17a00000UL + 0x124));
+	CPDETAIL(con_hex2(" gicr0", "pend=", rd(0x17a60000UL + 0x10200), "en=", rd(0x17a60000UL + 0x10100)));
+	CPDETAIL(con_hex2(" spi288", "pend=", rd(0x17a00000UL + 0x224), "en=", rd(0x17a00000UL + 0x124)));
 	__asm__ volatile("msr cntp_ctl_el0, %0; msr cntv_ctl_el0, %0; isb" : : "r"((uint64_t)2));	/* off, masked */
 	gpu_w(0x0038, 0);				/* RBBM_INT_0_MASK */
 	wr(GMU_REG(0x23b06), 0xffffffffu);		/* GMU_AO_HOST_INTERRUPT_MASK */
@@ -993,6 +1074,7 @@ static void cp_test(void)
 	 * started; mainline does it after CP_ME_INIT. t15..t18 used mainline's
 	 * order and AUTH_AND_RESET never returned. Use downstream's.
 	 */
+	secure_context();
 	int zap_ok = zap_load();
 	if (!zap_ok)
 		return;
