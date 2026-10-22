@@ -38,6 +38,8 @@ command -v mkbootimg >/dev/null && MKBOOTIMG=mkbootimg || MKBOOTIMG="python3 ../
 [ -n "${TOUCH:-}" ] && BDEF="$BDEF -DBRINGUP_TOUCH"
 # TOUCH=dump: only dump the SMMU stream routing
 [ "${TOUCH:-}" = dump ] && BDEF="$BDEF -DTOUCH_SMMU_DUMP"
+# TOUCH=bb: bit-banged I2C on gpio6/7 instead of GENI/GPI
+[ "${TOUCH:-}" = bb ] && BDEF="$BDEF -DTOUCH_BB"
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $BDEF"
 # sweet keeps the historical out/ (NOTES.md refers to it)
 [ $BOARD = sweet ] && OUT=out || OUT=out/$BOARD

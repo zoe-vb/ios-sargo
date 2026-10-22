@@ -17,6 +17,11 @@
 #include "board.h"
 #include "console.h"
 
+#ifdef TOUCH_BB
+/* the GENI/GPI/SMMU path stays in the file but is not used by TOUCH=bb */
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
+
 #define GCC_PA		0x00100000UL
 #define GCC_VOTE	0x5200c		/* QUP wrapper 1 + SE1 votes */
 #define SE1_RCG		0x18148		/* gcc_qupv3_wrap1_s1_clk_src */
@@ -584,6 +589,7 @@ static int gpi_write(const uint8_t *data, unsigned n, int stretch)
 	return wait_event(0);
 }
 
+#ifndef TOUCH_BB
 /* RMI4 register read on the current page: pointer write (held bus), then read. */
 static int rmi_read(uint8_t reg, uint8_t *buf, unsigned len)
 {
@@ -609,6 +615,146 @@ static int rmi_write1(uint8_t reg, uint8_t v)
 	uint8_t b[2] = { reg, v };
 	return gpi_write(b, 2, 0);
 }
+#else
+/*
+ * t02-t07: every GSI transfer halted the whole system (secure side), even
+ * with GPI's stream routed like the eMMC's. TOUCH_BB: bit-banged I2C on the
+ * same pins as plain GPIOs, open drain: a line is driven low (output 0) or
+ * released (input; board/internal pull-up). ~50 kHz, clock stretching honoured.
+ */
+#define BB_HALF_US	10
+
+static void bb_low(unsigned pin)
+{
+	wr(GPIO_IO(pin), rd(GPIO_IO(pin)) & ~2u);
+	wr(GPIO_CFG(pin), (rd(GPIO_CFG(pin)) & ~0x3ffu) | 3u | (1u << 6) | 0x200u);	/* out, pull-up, 4 mA */
+}
+
+static void bb_release(unsigned pin)
+{
+	wr(GPIO_CFG(pin), (rd(GPIO_CFG(pin)) & ~0x3ffu) | 3u | (1u << 6));		/* input, pull-up */
+}
+
+static int bb_read(unsigned pin)
+{
+	return rd(GPIO_IO(pin)) & 1;
+}
+
+static int bb_scl_high(void)
+{
+	bb_release(PIN_SCL);
+	for (unsigned i = 0; i < 2000 && !bb_read(PIN_SCL); i++)	/* clock stretching, 20 ms */
+		udelay(10);
+	return bb_read(PIN_SCL);
+}
+
+static void bb_start(void)
+{
+	bb_release(PIN_SDA);
+	bb_scl_high();
+	udelay(BB_HALF_US);
+	bb_low(PIN_SDA);
+	udelay(BB_HALF_US);
+	bb_low(PIN_SCL);
+	udelay(BB_HALF_US);
+}
+
+static void bb_stop(void)
+{
+	bb_low(PIN_SDA);
+	udelay(BB_HALF_US);
+	bb_scl_high();
+	udelay(BB_HALF_US);
+	bb_release(PIN_SDA);
+	udelay(BB_HALF_US);
+}
+
+/* returns 0 on ACK */
+static int bb_write_byte(uint8_t b)
+{
+	for (int i = 7; i >= 0; i--) {
+		if (b & (1u << i))
+			bb_release(PIN_SDA);
+		else
+			bb_low(PIN_SDA);
+		udelay(BB_HALF_US);
+		bb_scl_high();
+		udelay(BB_HALF_US);
+		bb_low(PIN_SCL);
+	}
+	bb_release(PIN_SDA);
+	udelay(BB_HALF_US);
+	bb_scl_high();
+	int nack = bb_read(PIN_SDA);
+	udelay(BB_HALF_US);
+	bb_low(PIN_SCL);
+	return nack;
+}
+
+static uint8_t bb_read_byte(int ack)
+{
+	uint8_t b = 0;
+	bb_release(PIN_SDA);
+	for (int i = 7; i >= 0; i--) {
+		udelay(BB_HALF_US);
+		bb_scl_high();
+		if (bb_read(PIN_SDA))
+			b |= 1u << i;
+		udelay(BB_HALF_US);
+		bb_low(PIN_SCL);
+	}
+	if (ack)
+		bb_low(PIN_SDA);
+	udelay(BB_HALF_US);
+	bb_scl_high();
+	udelay(BB_HALF_US);
+	bb_low(PIN_SCL);
+	bb_release(PIN_SDA);
+	return b;
+}
+
+static void bb_bus_init(void)
+{
+	bb_release(PIN_SDA);
+	bb_release(PIN_SCL);
+	udelay(100);
+	con_hex2("BB I2C", "sda=", bb_read(PIN_SDA), "scl=", bb_read(PIN_SCL));
+	/* free a slave holding SDA low: up to 9 clocks, then STOP */
+	for (int i = 0; i < 9 && !bb_read(PIN_SDA); i++) {
+		bb_low(PIN_SCL);
+		udelay(BB_HALF_US);
+		bb_scl_high();
+		udelay(BB_HALF_US);
+	}
+	bb_stop();
+}
+
+static int rmi_read(uint8_t reg, uint8_t *buf, unsigned len)
+{
+	bb_start();
+	if (bb_write_byte(RMI_ADDR << 1) || bb_write_byte(reg)) {
+		bb_stop();
+		return E_NACK;
+	}
+	bb_start();				/* repeated start */
+	if (bb_write_byte(RMI_ADDR << 1 | 1)) {
+		bb_stop();
+		return E_NACK;
+	}
+	for (unsigned i = 0; i < len; i++)
+		buf[i] = bb_read_byte(i + 1 < len);
+	bb_stop();
+	return 0;
+}
+
+static int rmi_write1(uint8_t reg, uint8_t v)
+{
+	bb_start();
+	int err = bb_write_byte(RMI_ADDR << 1) || bb_write_byte(reg) || bb_write_byte(v);
+	bb_stop();
+	return err ? E_NACK : 0;
+}
+#endif
 
 static void hexline(const char *label, const uint8_t *b, unsigned n)
 {
@@ -631,28 +777,42 @@ void test_touch(void)
 	smmu_dump();
 	return;
 #endif
+#ifndef TOUCH_BB
 	smmu_probe(0x6d6);
 	if (!smmu_route_cb0(0x6d6))
 		return;
 	smmu_probe(0x6d6);
 	if (!clocks() || !gpi_init())
 		return;
+#endif
 	con_hex2("TLMM", "rst=", rd(GPIO_CFG(PIN_RESET)), "irq=", rd(GPIO_CFG(PIN_IRQ)));
 	con_hex2(" i2c", "sda=", rd(GPIO_CFG(PIN_SDA)), "scl=", rd(GPIO_CFG(PIN_SCL)));
 	gpio(PIN_IRQ, 0, 3, 1, 0, 0);		/* input, pull-up */
+#ifdef TOUCH_BB
+	bb_bus_init();				/* gpio6/7 as plain GPIOs */
+#else
 	gpio(PIN_SDA, 1, 0, 0, 0, 0);		/* qup9, 2 mA, no pull */
 	gpio(PIN_SCL, 1, 0, 0, 0, 0);
+#endif
 	gpio(PIN_RESET, 0, 0, 1, 1, 0);		/* reset low */
 	mdelay(10);
 	gpio(PIN_RESET, 0, 0, 1, 1, 1);		/* release */
 	mdelay(200);				/* syna,startup-delay-ms */
 
 	int err = rmi_write1(0xff, 0);		/* page 0 */
+#ifdef TOUCH_BB
+	con_hex2("PAGE0", "err=", err, "nack=", err == E_NACK);
+	if (err) {
+		con_str("TOUCH", "no ACK at 0x20: IC unpowered? (PM660 GPIO12)");
+		return;
+	}
+#else
 	con_hex2("PAGE0", "err=", err, "ev3=", last_ev[3]);
 	if (err) {
 		gpi_dump(err == E_TIME ? "page select: no completion event" : "page select failed");
 		return;
 	}
+#endif
 	/*
 	 * Page Description Table (Linux rmi_driver.c): entries of 6 bytes read
 	 * forward from 0xe9 (query, cmd, ctrl, data base, irq count/version,
