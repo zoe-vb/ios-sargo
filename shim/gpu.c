@@ -384,6 +384,7 @@ static void gmu_rpmh_init(void)
 }
 
 /* Linux cmd_db_read_aux_data(): the ARC level list of an RPMh resource */
+static uint32_t cmd_db_addr;	/* RPMh address of the last cmd_db_aux() match */
 static const uint16_t *cmd_db_aux(const char *id, unsigned *count)
 {
 	uint32_t base = rd(CMD_DB_PTR), size = rd(CMD_DB_PTR + 4);
@@ -407,6 +408,7 @@ static const uint16_t *cmd_db_aux(const char *id, unsigned *count)
 			if (k < 8 && (id[k] || ent[k]))
 				continue;
 			*count = (ent[20] | ent[21] << 8) / 2;
+			cmd_db_addr = ent[16] | ent[17] << 8 | (uint32_t)ent[18] << 16 | (uint32_t)ent[19] << 24;
 			return (const uint16_t *)(data + doff + (ent[22] | ent[23] << 8));
 		}
 	}
@@ -630,6 +632,60 @@ static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1,
 	return (int64_t)x0;
 }
 
+/*
+ * t15e: the GMU no longer faults (HFI v1 setup), but AUTH_AND_RESET still
+ * never returns. TZ checks the signature with the crypto engine; downstream
+ * scm_pas_enable_bw() votes crypto bandwidth around every PAS auth, which on
+ * RPMh is the "CE0" BCM. One ACTIVE vote through the apps RSC (DRV 2,
+ * stock DT mailbox@179e0000: TCS 0/1 ACTIVE at +0xd00, stride 0x2a0), as
+ * the sweet RPMh client (patch 0062) sends its LDO vote.
+ */
+#define RSC_TCS		0x179e0d00UL
+#define TCS_STRIDE	0x2a0
+static uint32_t rpmh_bcm_vote(const char *id, uint32_t data)
+{
+	unsigned n = 0;
+	if (!cmd_db_aux(id, &n) || (cmd_db_addr >> 16) != 5)	/* BCM slave */
+		return 0xbad00000u | (cmd_db_addr >> 16);
+	uint32_t addr = cmd_db_addr;
+	unsigned tcs = 2;
+	for (unsigned i = 0; i < 2; i++) {
+		uintptr_t b = RSC_TCS + i * TCS_STRIDE;
+		if (rd(b + 0x18) && !rd(b + 0x14) && !rd(b + 0x1c) && !(rd(RSC_TCS + 0x04) & (1u << i))) {
+			tcs = i;
+			break;
+		}
+	}
+	if (tcs == 2)
+		return 0xbad0b05eu;
+	uintptr_t b = RSC_TCS + tcs * TCS_STRIDE;
+	uint32_t irq_en = rd(RSC_TCS + 0x00);
+	wr(RSC_TCS + 0x00, irq_en & ~(1u << tcs));
+	wr(b + 0x30, 8u | (1u << 8) | (1u << 16));	/* MSGID: write, response */
+	wr(b + 0x34, addr);
+	wr(b + 0x38, data);
+	wr(b + 0x10, 1);				/* WAIT_FOR_CMPL */
+	wr(b + 0x1c, 1);				/* CMD_ENABLE */
+	wr(b + 0x14, 0);
+	wr(b + 0x14, 1u << 16);				/* AMC mode */
+	wr(b + 0x14, (1u << 16) | (1u << 24));		/* trigger */
+	uint32_t st = 0;
+	for (unsigned us = 0; us < 100000; us++) {
+		st = rd(b + 0x3c);
+		if ((st & ((1u << 8) | (1u << 16))) == ((1u << 8) | (1u << 16)) && rd(b + 0x18))
+			break;
+		udelay(1);
+	}
+	wr(b + 0x14, 1u << 16);
+	wr(b + 0x14, 0);
+	wr(b + 0x1c, 0);
+	wr(b + 0x10, 0);
+	wr(RSC_TCS + 0x08, 1u << tcs);			/* IRQ clear */
+	wr(RSC_TCS + 0x00, irq_en);
+	con_hex2(" bcm", "addr=", addr, "status=", st);
+	return st;
+}
+
 /* Linux qcom_mdt_load + qcom_scm_pas_auth_and_reset for the a615 zap shader */
 static int zap_load(void)
 {
@@ -670,8 +726,8 @@ static int zap_load(void)
 	__asm__ volatile("dsb sy" ::: "memory");
 	con_hex2(" region", "copied0=", dst[0], "step=", 3);
 	gmu_oob(" oob gpu2", 16, 24);
-	con_hex2(" gx", "sptprac=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)), "trust=", rd(GPU + 0xf400 * 4));
-	con_hex2(" cb1/2", "sctlr1=", rd(GSMMU_CB(1)), "sctlr2=", rd(GSMMU_CB(2)));
+	CPDETAIL(con_hex2(" gx", "sptprac=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)), "trust=", rd(GPU + 0xf400 * 4)));
+	rpmh_bcm_vote("CE0", (1u << 30) | (1u << 29) | (1u << 14) | 1u);	/* commit, valid, x=1, y=1 */
 	con_str(" pas", "AUTH_AND_RESET...");
 	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
 	con_hex2(" pas", "auth=", (uint32_t)rr, "word0=", *(volatile uint32_t *)ZAP_REGION);
