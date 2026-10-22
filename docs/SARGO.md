@@ -278,7 +278,14 @@ x0=x1=0; auth still hangs. **t23 (12e99d2)**: .mdt copied into the carveout and 
 downstream pil_boot does (mdata_phys = region_start): still hangs (owner report). **t24 (5275483)**: RPMh BCM votes for the crypto
 engine's whole NoC path (CE0, SN10 aggre2, SN0 system NoC; SH0/MC0/ACV carry CPU traffic anyway): still hangs.
 Untested alternative: secure-mode rendering may only need the GPU's secure stream (SID 2) routed to the same page
-tables as SID 0 - ios-sailfish's a5xx secure-mode blits wrote nothing, but it only mapped stream 0.
+tables as SID 0 - ios-sailfish's a5xx secure-mode blits wrote nothing, but it only mapped stream 0. **t25 (6bfca03, owner report): "nothing written (secure-mode block?)"** - a 2D solid
+fill (Mesa r2d_* + CP_BLIT) with SID 2 routed to the GPU's normal context bank completed (timestamp landed, no
+SMMU fault) but the destination stayed 0xdeadbeef. **So in secure mode the render backend writes nothing to
+normal memory regardless of SMMU routing** (same as ios-sailfish a5xx); only CP_MEM_WRITE lands. GPU rendering
+therefore REQUIRES leaving secure mode, which requires the zap AUTH_AND_RESET, which hangs on this firmware
+(PQ3B) from both the bare shim and XNU despite reproducing all of downstream KGSL's pre-zap setup.
+**GPU bring-up parked here.** Only remaining lead: fastboot-boot a mainline/postmarketOS kernel to confirm
+whether the zap loads on this firmware outside Android (ground truth), then diff its state.
 
 ## Stage plan
 

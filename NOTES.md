@@ -43,7 +43,11 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   sargogpu=1; firmware via `mkpayload --blob GPU-GMU=.. --blob GPU-SQE=.. --blob GPU-ZAP-MDT=.. --blob
   GPU-ZAP-B02=..` from research/sargo-gpu-fw-phone/. Next: download 0089 kernel -> x21 (x18 cmdline minus
   sweetfb_noconsole, plus sargogpu=1) and read the SWEET GPU lines. With cpus=1 a TZ hang freezes iOS.
-  **0090 + x22 (IMG_0076): whole sequence runs in XNU, AUTH_AND_RESET hangs iOS the same way.** Plan: GLES via Mesa freedreno like
+  **0090 + x22 (IMG_0076): whole sequence runs in XNU, AUTH_AND_RESET hangs iOS the same way.**
+  **GPU PARKED (t25, 6bfca03): secure-mode render backend writes nothing even with SID 2 mapped - leaving
+  secure mode (zap) is required and its AUTH_AND_RESET hangs on PQ3B firmware. See docs/SARGO.md GPU bring-up.**
+  Reusable: shim/gpu.c (GPU=gmu/gx/cp/zap/trust/blit), xnu patch 0089/0090 + tools/gpu2xnu.py, firmware in
+  research/sargo-gpu-fw-phone/. Plan: GLES via Mesa freedreno like
   joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
