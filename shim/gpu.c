@@ -716,9 +716,24 @@ static int zap_load(void)
 	 * exception: in the copy or in AUTH_AND_RESET. t15b marks each step.
 	 */
 	CPDETAIL(con_hex2(" region", "before=", *(volatile uint32_t *)ZAP_REGION, "meta=", (uint32_t)(uintptr_t)zap_meta));
-	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, (uintptr_t)zap_meta, 0, 0);	/* VAL, RW */
-	int64_t rm = scm(0x0202, 3, ZAP_PAS_ID, ZAP_REGION, 0x1000, 0);
-	con_hex2(" pas", "init=", (uint32_t)ri, "memsetup=", (uint32_t)rm);
+	/*
+	 * t18: Linux (qcom_scm_pas_init_image: "ret ? : res.result[0]") and
+	 * ios-sailfish (r != 0 || r1 != 0) also fail on a non-zero x1 result;
+	 * t15..t17b only checked x0. Show both and stop on either.
+	 */
+	uint64_t ri1 = 0xdead, rm1 = 0xdead;
+	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, (uintptr_t)zap_meta, 0, &ri1);	/* VAL, RW */
+	con_hex2(" init", "x0=", (uint32_t)ri, "x1=", (uint32_t)ri1);
+	if (ri || ri1) {
+		con_str("ZAP", "INIT_IMAGE refused (x1): auth not attempted");
+		return 0;
+	}
+	int64_t rm = scm(0x0202, 3, ZAP_PAS_ID, ZAP_REGION, 0x1000, &rm1);
+	con_hex2(" memset", "x0=", (uint32_t)rm, "x1=", (uint32_t)rm1);
+	if (rm || rm1) {
+		con_str("ZAP", "MEM_SETUP refused (x1): auth not attempted");
+		return 0;
+	}
 	con_hex2(" pas", "region=", (uint32_t)ZAP_REGION, "pas=", ZAP_PAS_ID);
 	if (ri || rm)
 		return 0;
