@@ -250,6 +250,15 @@ INIT_IMAGE and MEM_SETUP also 0 (owner report) - both fully accepted; auth hangs
 SQE starts (downstream KGSL a6xx_microcode_load order) - no change. Untested: whether the zap loads at all on this
 firmware (bootloader b4s4-0.1-5653622) under any OS other than its own Android; mainline sargo users typically run
 later firmware. Next idea: fastboot boot a mainline Linux (msm DRM + a615 zap) and read its log on the framebuffer.
+**Firmware source**: the phone runs Google's PQ3B.190801.002 (Aug 2019, what the Ubuntu Touch installer requires;
+UT's downstream kernel + Adreno blobs used the GPU fine). The owner pulled /vendor/firmware from the phone
+(research/sargo-gpu-fw-phone/, not in git): a630_gmu.bin, a630_sqe.fw, a615_zap.b00/.b02 identical to PD2A, but
+**a615_zap.b01/.mdt/.elf re-signed** (different hash segment). **t20 (ef8a1d2)** with the phone's zap: same hang.
+**t21 (19ac5fa, IMG_0075)**: before auth ISR_EL1 0, EL1 timers off, GICR0 pending 0x10000000 (PPI 28, not
+enabled), SPIs 288-319 none pending/enabled; after quiescing still nothing pending: same hang. Ruled out so far:
+region address, our GPU programming/order (mainline and downstream), x1 results, GMU fault, CE0 bandwidth, CB
+choice, interrupts, zap signature. Remaining difference: the shim's bare CPU state (EL1, MMU and caches off, one
+CPU) under the QHEE hypervisor vs. a kernel.
 
 ## Stage plan
 
