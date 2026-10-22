@@ -11,7 +11,7 @@
  * what Linux does before it loads the GMU firmware. Nothing in the GX
  * domain (the GPU core) is touched; its registers are not read.
  *
- * t11 (GPU=gmu, -DGPU_GMU_BOOT): then boot the GMU as Linux a6xx_gmu_fw_start
+ * t11/t12 (GPU=gmu, -DGPU_GMU_BOOT): then boot the GMU as Linux a6xx_gmu_fw_start
  * does for the legacy (a630-family) firmware: GMU clock at 200 MHz, a GPU
  * SMMU context bank (CB 1, stage 1) mapping 64 KiB of shim memory at the
  * GMU's uncached window 0x60000000 for GMU streams 4/5, the firmware
@@ -191,14 +191,38 @@ static int gsmmu_map_gmu(void)
 	wr(cb + 0x7f0, 0);				/* TLBSYNC */
 	wait_bits(cb + 0x7f4, 1u, 0);
 	wr(cb + 0x00, 0x67u);				/* M, TRE, AFE, CFRE, CFIE */
-	/* SMR 0: GMU streams 4 and 5 (id 4, mask 1) -> CB 1 */
-	wr(GSMMU + 0xc00, GMU_CB);
-	wr(GSMMU + 0x800, (1u << 31) | (1u << 16) | 4u);
-	con_hex2(" smr0", "smr=", rd(GSMMU + 0x800), "s2cr=", rd(GSMMU + 0xc00));
 	con_hex2(" cb1", "cbar=", rd(GSMMU_GR1 + 4 * GMU_CB), "sctlr=", rd(cb));
 	con_hex2(" cb1", "ttbr0=", rd(cb + 0x20), "tcr=", rd(cb + 0x30));
-	return rd(GSMMU + 0x800) == ((1u << 31) | (1u << 16) | 4u) && rd(GSMMU + 0xc00) == GMU_CB &&
-	    (rd(cb) & 1u) && rd(cb + 0x20) == (uint32_t)(uintptr_t)pt_l1;
+	if (!(rd(cb) & 1u) || rd(cb + 0x20) != (uint32_t)(uintptr_t)pt_l1)
+		return 0;
+	/*
+	 * t11: an SMR for streams 4+5 (id 4, mask 1) read back 0 while its
+	 * S2CR stuck - the firmware drops it. Try exact single-stream SMRs
+	 * (mainline maps only GMU stream 5; downstream also 4), several slots.
+	 */
+	static const struct { uint8_t slot, sid; } try[] = { {0, 5}, {1, 4}, {4, 5}, {3, 4}, {2, 5} };
+	int have5 = 0, have4 = 0;
+	for (unsigned i = 0; i < sizeof(try) / sizeof(try[0]); i++) {
+		unsigned s = try[i].slot, sid = try[i].sid;
+		if ((sid == 5 && have5) || (sid == 4 && have4))
+			continue;
+		wr(GSMMU + 0xc00 + 4 * s, GMU_CB);
+		wr(GSMMU + 0x800 + 4 * s, (1u << 31) | sid);
+		uint32_t smr = rd(GSMMU + 0x800 + 4 * s);
+		char lbl[] = " smr0";
+		lbl[4] = (char)('0' + s);
+		con_hex2(lbl, "smr=", smr, "s2cr=", rd(GSMMU + 0xc00 + 4 * s));
+		if (smr == ((1u << 31) | sid)) {
+			if (sid == 5)
+				have5 = 1;
+			else
+				have4 = 1;
+		} else {
+			wr(GSMMU + 0xc00 + 4 * s, 0x000200ffu);	/* back to fault */
+		}
+	}
+	con_hex2(" sids", "5=", have5, "4=", have4);
+	return have5;
 }
 
 static void gmu_boot(void)
