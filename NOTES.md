@@ -17,6 +17,8 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   fingers, started from sweet_sdhc_init, boot-arg sargotouch=0 off) + SweetHID panel size from
   PE_current_console (2220 -> offset 108 in 1125x2436). Next: download the 0087 kernel ->
   `xnu-kernel-0087/`, build x19 = x18 config with it, boot, unlock test. Not hardware-tested in XNU yet.
+  0087 CI kernel downloaded -> `xnu-kernel-0087/` (SHA256SUMS OK); **x19** = `shim/out/sargo/shim-boot-x19.img`
+  (0087 kernel + sargo-x13.adt + x18 cmdline). Boot sent 2026-10-22 ~13:03, result pending.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
