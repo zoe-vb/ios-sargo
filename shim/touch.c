@@ -377,7 +377,7 @@ static void smmu_probe(unsigned sid)
  */
 static uintptr_t smmu_cb_base;		/* context bank used for 0x6d6, 0 = plain bypass */
 
-static int smmu_bypass(unsigned sid)
+static int __attribute__((unused)) smmu_bypass(unsigned sid)	/* t04/t05: CB 46 - the system stopped */
 {
 	uint32_t idr0 = rd(SMMU + 0x20), idr1 = rd(SMMU + 0x24);
 	unsigned n = idr0 & 0xff, slot = n;
@@ -419,7 +419,7 @@ static int smmu_bypass(unsigned sid)
  * work (the eMMC has no iommus but DMAs fine) to copy that for 0x6d6.
  * Per valid SMR: index, SMR, S2CR; for S2CR type translate also CBAR/SCTLR.
  */
-static void smmu_dump(void)
+static void __attribute__((unused)) smmu_dump(void)
 {
 	uint32_t idr0 = rd(SMMU + 0x20), idr1 = rd(SMMU + 0x24);
 	unsigned n = idr0 & 0xff, pgsize = (idr1 >> 31) ? 0x10000 : 0x1000;
@@ -446,6 +446,40 @@ static void smmu_dump(void)
 			shown++;
 		}
 	}
+}
+
+/*
+ * t06: the firmware routes the streams that work - the eMMC's 0x140/0xf
+ * among them - to context bank 0 (CBAR 0x10000 = S1 translate / S2 bypass,
+ * SCTLR 0xe0 = translation off): Linux's bypass-quirk setup, but in CB 0.
+ * t04/t05 used CB 46 and the system stopped at the first DMA. Point 0x6d6
+ * at the firmware's own CB 0 instead; change nothing else.
+ */
+static int smmu_route_cb0(unsigned sid)
+{
+	uint32_t idr0 = rd(SMMU + 0x20), idr1 = rd(SMMU + 0x24);
+	unsigned n = idr0 & 0xff, slot = n, pgsize = (idr1 >> 31) ? 0x10000 : 0x1000;
+	unsigned npage = 1u << (((idr1 >> 28) & 7) + 1);
+	uint32_t cbar0 = rd(SMMU + pgsize), sctlr0 = rd(SMMU + (uintptr_t)npage * pgsize);
+	con_hex2("CB0", "cbar=", cbar0, "sctlr=", sctlr0);
+	if (cbar0 != 0x10000 || (sctlr0 & 1)) {
+		con_str("CB0", "not the untranslated bank seen in t06");
+		return 0;
+	}
+	for (unsigned i = n; i-- > 0;)
+		if (!(rd(SMMU + 0x800 + 4 * i) & (1u << 31))) {
+			slot = i;
+			break;
+		}
+	if (slot == n) {
+		con_str("SMMU", "no free stream match entry");
+		return 0;
+	}
+	wr(SMMU + 0xc00 + 4 * slot, 0);				/* S2CR: translate via CB 0 */
+	wr(SMMU + 0x800 + 4 * slot, 1u << 31 | (sid & 0x7fff));	/* SMR: valid, exact id */
+	con_hex2(" slot", "n=", slot, "s2cr=", rd(SMMU + 0xc00 + 4 * slot));
+	con_hex2(" smr", "v=", rd(SMMU + 0x800 + 4 * slot), 0, 0);
+	return 1;
 }
 
 static void put_tre(uint32_t *ring, unsigned *wp, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
@@ -598,7 +632,7 @@ void test_touch(void)
 	return;
 #endif
 	smmu_probe(0x6d6);
-	if (!smmu_bypass(0x6d6))
+	if (!smmu_route_cb0(0x6d6))
 		return;
 	smmu_probe(0x6d6);
 	if (!clocks() || !gpi_init())

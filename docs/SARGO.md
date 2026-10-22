@@ -163,6 +163,13 @@ DFS on (0x21, level 0 = XO), SE fw 0x300 (I2C protocol), FIFOs 32-bit x16, **but
 (0x64) bit 0 = FIFO interface disabled**: i2c9 is in GSI mode (stock DT: `dmas = <&gpi_dma1 ...>`).
 Unlike sweet, every transfer must go through the GPI DMA engine (Linux geni-i2c gpi path, qcom/gpi.c).
 Next: minimal polled GPI DMA (one tx/rx channel pair + event ring, I2C config0/go/dma TREs).
+GPI probes: t02 both GPI channels started (GPII 1), CPU stopped at the first doorbell. t03:
+apps_smmu (qsmmu-v500, 0x15000000) sCR0 0x00200406 = enabled + USFCFG (unmatched streams fault),
+71 SMRs, none for GPI's SID 0x6d6. t04: S2CR bypass is turned into fault by the hypervisor (Linux
+"bypass quirk"); CB 46 as S1-trans/S2-bypass with SCTLR.M=0 accepted, but the system stops within
+~1 ms of the first doorbell (t04/t05). t06 dump: the firmware's own routing - eMMC SID 0x140/0xf,
+0x0a0/0xf, 0x0c0/0xf -> CB 0 (CBAR 0x10000, SCTLR 0xe0, i.e. untranslated); 0x100/0xf -> CB 1;
+0x740 -> CB 2; 0x880/0x8, 0xc80/0x8 -> CB 3 (CBAR 0x10003). t07 routes 0x6d6 to CB 0.
 
 ## Stage plan
 
