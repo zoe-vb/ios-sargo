@@ -153,6 +153,17 @@ started after the UFS root (`/sweet-ufs` absent here) or `sweetbattery=1`.
   confirmed), then a write path (needed for the iOS root) and installing the HFS+ root into userdata
   (erases Android data: ask the user first).
 
+## Touch bring-up (2026-10-22)
+
+Facts (stock DTB + Linux pinctrl-sdm670 + sdm670-google-common): Synaptics RMI4 at 0x20 on i2c9 =
+QUP wrapper 1 SE1 at 0xa84000 (same engine address, GCC vote 0x5200c / RCG 0x18148 as sweet's touch
+bus), SDA/SCL gpio6/7 function qup9 (mux 1), reset gpio99, IRQ gpio125, all TLMM NORTH (0x3900000);
+1.8 V vio = PM660 GPIO 12. Shim probe t01 (`TOUCH=1`, photo IMG_0049): GCC vote 0x45be63c0, RCG
+DFS on (0x21, level 0 = XO), SE fw 0x300 (I2C protocol), FIFOs 32-bit x16, **but GENI_IF_DISABLE_RO
+(0x64) bit 0 = FIFO interface disabled**: i2c9 is in GSI mode (stock DT: `dmas = <&gpi_dma1 ...>`).
+Unlike sweet, every transfer must go through the GPI DMA engine (Linux geni-i2c gpi path, qcom/gpi.c).
+Next: minimal polled GPI DMA (one tx/rx channel pair + event ring, I2C config0/go/dma TREs).
+
 ## Stage plan
 
 1. **Shim stage 1** (`BOARD=sargo shim/build.sh`): boots via `fastboot boot`, draws on
