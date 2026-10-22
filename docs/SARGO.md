@@ -210,7 +210,13 @@ exact stream-0 SMR was accepted on its GPU SMMU.) **t12** (f07e925): exact SMRs,
 no GMU2HOST/AO interrupts, CB 1 FSR 0x400 (only FORMAT = AArch64, no fault), log/hfi words still 0.
 Next: RPMh/PDC init (a6xx_gmu_rpmh_init, sdm845 PDC 0xb280000 / seq 0xb480000, RSCC = GMU + 0x23000),
 RPMH_CTRL votes, GX/MX vote indexes (cmd-db ARC levels) + OOB BOOT_SLUMBER, SPTPRAC, HFI queues, then
-GX GDSC and the first GPU core register reads (RBBM).
+GX GDSC and the first GPU core register reads (RBBM). **t13 (4720096, IMG_0064): GPU CORE REGISTERS ALIVE.** PDC enable
+0x80000001, RSCC seq 0xa7a506a0 read back; cmd-db via AOP msg RAM: base 0x85fe0000 (same as mainline);
+gfx.lvl and mx.lvl 16 entries each, gfx starts 0, 0x10, 0x30, 0x40 -> MIN_SVS (48) = GX index 2, MX index 3;
+OOB BOOT_SLUMBER acked (g2h 0x40000000), SPTPRAC on (status 0x28), HFI_CTRL_STATUS 1, OOB GPU_SET acked
+(g2h 0x01000000); GX GDSCR 0xf8222000 (on); RBBM_STATUS and INT_0 read, CP_SCRATCH0 write 0x615c0de5 reads
+back. Next: GPU SMMU for GPU stream 0 (exact SMR), a630_sqe.fw into CP, CP init + ring test (CP_ME_INIT,
+CP_MEM_WRITE), then the a615 zap shader via TZ (PAS id 13) to leave secure mode.
 
 ## Stage plan
 

@@ -33,7 +33,8 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
 - **GPU (2026-10-22, active): GMU FIRMWARE BOOTS (t12, `f07e925`, IMG_0063)** - shim probe `GPU=gmu`
   (shim/gpu.c; firmware from factory image PD2A.190115.029 vendor.img in research/sargo-gpu-fw/, embedded at
   build time, never in git). Details + next steps: docs/SARGO.md "GPU bring-up". Key lesson: the GPU SMMU's
-  firmware drops masked SMRs; exact single-stream SMRs stick. Plan: GLES via Mesa freedreno like
+  firmware drops masked SMRs; exact single-stream SMRs stick. **t13 (4720096): GX powered through the GMU,
+  GPU core registers read/write (CP scratch readback OK).** Plan: GLES via Mesa freedreno like
   joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
