@@ -520,15 +520,31 @@ static int zap_load(void)
 	for (uint32_t i = 0; i < mdt_size; i++)
 		zap_meta[i] = zap_mdt[i];
 	__asm__ volatile("dsb sy" ::: "memory");
+	/*
+	 * t15 (IMG_0068) hung after INIT_IMAGE/MEM_SETUP returned 0, with no
+	 * exception: in the copy or in AUTH_AND_RESET. t15b marks each step.
+	 */
+	con_hex2(" region", "before=", *(volatile uint32_t *)ZAP_REGION, "meta=", (uint32_t)(uintptr_t)zap_meta);
 	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, (uintptr_t)zap_meta, 0, 0);	/* VAL, RW */
 	int64_t rm = scm(0x0202, 3, ZAP_PAS_ID, ZAP_REGION, 0x1000, 0);
 	con_hex2(" pas", "init=", (uint32_t)ri, "memsetup=", (uint32_t)rm);
 	if (ri || rm)
 		return 0;
-	volatile uint8_t *dst = (volatile uint8_t *)ZAP_REGION;		/* segment pa 0x5000 = region + 0 */
-	for (uint32_t i = 0; i < 0x1000; i++)
-		dst[i] = i < b02_size ? zap_b02[i] : 0;
+	con_hex2(" region", "read=", *(volatile uint32_t *)ZAP_REGION, "step=", 1);
+	volatile uint32_t *dst = (volatile uint32_t *)ZAP_REGION;	/* segment pa 0x5000 = region + 0 */
+	dst[0] = 0x12345678u;
 	__asm__ volatile("dsb sy" ::: "memory");
+	con_hex2(" region", "wrote1=", dst[0], "step=", 2);
+	for (uint32_t i = 0; i < 0x1000 / 4; i++) {
+		uint32_t w = 0;
+		for (unsigned k = 0; k < 4; k++)
+			if (i * 4 + k < b02_size)
+				w |= (uint32_t)zap_b02[i * 4 + k] << (8 * k);
+		dst[i] = w;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	con_hex2(" region", "copied0=", dst[0], "step=", 3);
+	con_str(" pas", "AUTH_AND_RESET...");
 	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
 	con_hex2(" pas", "auth=", (uint32_t)rr, "word0=", *(volatile uint32_t *)ZAP_REGION);
 	return rr == 0;
