@@ -53,7 +53,10 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   path, not the firmware/shader/GPU-setup. Reopen the GPU by matching qcom_scm's AUTH_AND_RESET invocation.**
   **SOLVED (t26, 0c31dcf): the SMC left x7 as a garbage clobber; mainline passes x7=0. Zeroed x7 in
   scm()/scm5() -> AUTH_AND_RESET returns 0 (auth x0=0 intr=0). The zap shader loads from the bare shim.
-  Next: confirm CP_SET_SECURE_MODE 0 + a render in non-secure mode, then fold x7=0 into XNU (gpu2xnu.py).**
+  **GPU OUT OF SECURE MODE (t29, f98bed6): SECURE MODE OFF, GPU STILL RUNS - the Adreno 615 is usable from the
+  shim.** Fixes: x7=0 in the SMC (t26); mainline order zap-after-ME_INIT (t27); no CPU read of the zap carveout
+  after auth (t28/t29). Next: fold all three into tools/gpu2xnu.py -> regenerate xnu 0089, boot GPU-in-iOS out
+  of secure mode, then a real RB render + GLES/freedreno into CoreAnimation (ios-sailfish approach).**
   Plan: GLES via Mesa freedreno like
   joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and

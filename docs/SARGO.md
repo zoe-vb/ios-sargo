@@ -301,6 +301,16 @@ __scm_smc_do_quirk (qcom_scm-smc.c) always passes x7 = args[7] = 0 (and x6 = sav
 x5/x6 but listed x7 only in the clobber list, so a nonzero x7 reached TZ and PAS AUTH_AND_RESET never returned.
 **t26 (0c31dcf): x7 = 0 in both helpers -> `auth x0=0 intr=0` (AUTH_AND_RESET returns success, no spins).**
 The zap shader now authorizes from the bare shim. (Also added a capped INTERRUPTED counter; it was 0.)
+
+**GPU OUT OF SECURE MODE (t29, f98bed6): `ZAP  SECURE MODE OFF, GPU STILL RUNS`.** Three fixes on top of the
+full bring-up: (1) x7=0 in the SMC (t26, the root cause); (2) mainline order - secure_context + SQE start +
+CP_ME_INIT, THEN zap_load, THEN CP_SET_SECURE_MODE via the running ring (t27); (3) do not CPU-read ZAP_REGION
+after AUTH_AND_RESET - it is reassigned to the secure VMID and the read faults (t28/t29). The GPU authenticates
+the a615_zap, CP_SET_SECURE_MODE 0 leaves secure mode, and a subsequent CP_MEM_WRITE lands in normal memory.
+The Adreno 615 is now fully usable from the bare shim. Build: `BOARD=sargo LLVM=1 GPU=zap GPUFW=phone shim/build.sh`.
+Next: fold x7=0 + the reorder + the no-read into tools/gpu2xnu.py and regenerate xnu patch 0089, then a real
+render (RB 2D fill, now that secure mode is off) and wiring the GPU into CoreAnimation via GLES (freedreno),
+as ios-sailfish does.
 (pmOS test artifacts in ~/Downloads/pmos-sargo-boot, not in git.)
 
 ## Stage plan
