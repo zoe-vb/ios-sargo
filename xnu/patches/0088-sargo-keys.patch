@@ -1,0 +1,302 @@
+--- a/bsd/dev/sweet_sargo_touch.c
++++ b/bsd/dev/sweet_sargo_touch.c
+@@ -1,5 +1,5 @@
+ /*
+- * SWEET touch screen for the Pixel 3a (sargo): Synaptics S3706B (RMI4) at
++ * SWEET touch screen and keys for the Pixel 3a (sargo): Synaptics S3706B (RMI4) at
+  * 0x20 on gpio6/7, reset gpio99, attention gpio125 (Linux
+  * sdm670-google-sargo / docs/SARGO.md).
+  *
+@@ -18,6 +18,14 @@
+  * type (1 finger, 2 stylus), x lo/hi, y lo/hi, z, wx, wy, in panel pixels
+  * (t09: 0x244/0x6e6 for a thumb at the lower middle of 1080x2220).
+  * Boot-arg sargotouch=0 disables it.
++ *
++ * The same thread polls the keys every 20 ms, like sweet_keys.c: power and
++ * volume down are PM660 PON KPDPWR/RESIN (PPID 0x008, RT status bits 0/1,
++ * as on sweet), volume up is PM660L GPIO 7 (PPID 0x2c6, RT status bit 0,
++ * low = pressed). Linux configures that GPIO as an input with pull-up
++ * (key_vol_up_default); ABL may not, so if it is not an enabled input the
++ * driver sets MODE 0x40 = 0 (input), VIN 0x41 = 0, PULL 0x42 = 0 (30 uA
++ * up) and EN 0x46 = 0x80. Boot-arg sargokeys=0 disables the keys.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -30,6 +38,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern void sweet_hid_key(int key, int down);
+ void sweet_sargo_touch_init(void);
+ 
+ #define ST_TLMM_PA      0x03900000u     /* TLMM NORTH */
+@@ -49,11 +58,13 @@
+ #define SPMI_OBS_PA     0x0e600000u
+ #define SPMI_CNFG_PA    0x0c40a000u
+ #define ST_PMIC_PPID    0x0cbu          /* PM660 (SID 0) GPIO 12 */
++#define ST_PON_PPID     0x008u          /* PM660 PON */
++#define ST_VOLUP_PPID   0x2c6u          /* PM660L (SID 2) GPIO 7 */
+ #define ST_NO_APID      0xffffu
+ 
+-static vm_offset_t st_tlmm, st_core, st_cnfg, st_obs, st_chnl;
+-static uint16_t st_apid = ST_NO_APID;
+-static bool st_started;
++static vm_offset_t st_tlmm, st_core, st_cnfg, st_obs;
++static uint32_t st_napid;
++static bool st_started, st_touch_enabled;
+ static int st_sleep_chan;
+ static uint8_t st_f01d, st_f12d;
+ 
+@@ -111,9 +122,9 @@
+ }
+ 
+ static int
+-spmi_read(uint8_t reg, uint8_t *v)
++spmi_read(uint16_t apid, uint8_t reg, uint8_t *v)
+ {
+-	vm_offset_t ch = st_obs + 0x80u * st_apid;      /* EE 0 observer */
++	vm_offset_t ch = st_obs + 0x80u * apid;         /* EE 0 observer */
+ 	uint32_t s;
+ 	if (spmi_cmd(ch, (1u << 27) | ((uint32_t)reg << 4), &s)) {    /* EXT_READL */
+ 		return -1;
+@@ -123,19 +134,19 @@
+ }
+ 
+ static int
+-spmi_write(uint8_t reg, uint8_t v)
++spmi_write(vm_offset_t chnl, uint8_t reg, uint8_t v)
+ {
+ 	uint32_t s;
+-	st_wr(st_chnl + 0x10u, v);
+-	if (spmi_cmd(st_chnl, (uint32_t)reg << 4, &s)) {               /* EXT_WRITEL */
+-		printf("SWEET SARGO TOUCH: PMIC write %#x failed, status %#x\n", reg, s);
++	st_wr(chnl + 0x10u, v);
++	if (spmi_cmd(chnl, (uint32_t)reg << 4, &s)) {                  /* EXT_WRITEL */
++		printf("SWEET SARGO: PMIC write %#x failed, status %#x\n", reg, s);
+ 		return -1;
+ 	}
+ 	return 0;
+ }
+ 
+ static bool
+-st_power_on(void)
++spmi_map(void)
+ {
+ 	st_core = ml_io_map(SPMI_CORE_PA, 0x2000);
+ 	st_cnfg = ml_io_map(SPMI_CNFG_PA, 0x1000);
+@@ -143,50 +154,133 @@
+ 	if (!st_core || !st_cnfg || !st_obs) {
+ 		return false;
+ 	}
+-	uint32_t ver = st_rd(st_core), count = st_rd(st_core + 4u) & 0x7ffu, owner = 7;
+-	if (ver < 0x50000000u || ver >= 0x70000000u || count == 0 || count > 512) {
+-		printf("SWEET SARGO TOUCH: unsupported SPMI arbiter %#x (%u APIDs)\n", ver, count);
++	uint32_t ver = st_rd(st_core);
++	st_napid = st_rd(st_core + 4u) & 0x7ffu;
++	if (ver < 0x50000000u || ver >= 0x70000000u || st_napid == 0 || st_napid > 512) {
++		printf("SWEET SARGO: unsupported SPMI arbiter %#x (%u APIDs)\n", ver, st_napid);
+ 		return false;
+ 	}
+-	for (uint32_t i = 0; i < count; i++) {
++	return true;
++}
++
++/* v5 can map one PPID more than once; prefer the apps-owned entry. */
++static uint16_t
++spmi_apid(uint32_t ppid, uint32_t *owner)
++{
++	uint16_t found = ST_NO_APID;
++	*owner = 7;
++	for (uint32_t i = 0; i < st_napid; i++) {
+ 		uint32_t map = st_rd(st_core + 0x900u + 4u * i);
+-		if (map == 0 || ((map >> 8) & 0xfffu) != ST_PMIC_PPID) {
++		if (map == 0 || ((map >> 8) & 0xfffu) != ppid) {
+ 			continue;
+ 		}
+ 		uint32_t o = st_rd(st_cnfg + 0x700u + 4u * i) & 7u;
+-		if (st_apid == ST_NO_APID || o == 0) {
+-			st_apid = (uint16_t)i;
+-			owner = o;
++		if (found == ST_NO_APID || o == 0) {
++			found = (uint16_t)i;
++			*owner = o;
+ 		}
+ 	}
+-	uint8_t type = 0, sub = 0;
+-	if (st_apid == ST_NO_APID || owner != 0 ||
+-	    spmi_read(0x04, &type) || spmi_read(0x05, &sub) || type != 0x10) {
+-		printf("SWEET SARGO TOUCH: PM660 GPIO 12 apid %u owner %u type %#x: not touched\n",
+-		    st_apid, owner, type);
+-		return false;
++	return found;
++}
++
++/* A PMIC GPIO's RW channel, only if it is a GPIO owned by the apps EE. */
++static vm_offset_t
++spmi_gpio_chnl(uint32_t ppid, const char *name, uint16_t *apid, uint8_t *sub)
++{
++	uint32_t owner;
++	uint8_t type = 0;
++	*apid = spmi_apid(ppid, &owner);
++	if (*apid == ST_NO_APID || owner != 0 ||
++	    spmi_read(*apid, 0x04, &type) || spmi_read(*apid, 0x05, sub) || type != 0x10) {
++		printf("SWEET SARGO: %s apid %u owner %u type %#x: not touched\n",
++		    name, *apid, owner, type);
++		return 0;
+ 	}
+-	st_chnl = ml_io_map(SPMI_CHNLS_PA + 0x10000u * st_apid, 0x1000);
+-	if (!st_chnl) {
++	return ml_io_map(SPMI_CHNLS_PA + 0x10000u * *apid, 0x1000);
++}
++
++static bool
++st_power_on(void)
++{
++	uint16_t apid;
++	uint8_t sub = 0;
++	vm_offset_t chnl = spmi_gpio_chnl(ST_PMIC_PPID, "PM660 GPIO 12", &apid, &sub);
++	if (!chnl) {
+ 		return false;
+ 	}
+ 	int err = 0;
+ 	if (sub >= 0x10) {                      /* LV/MV GPIO */
+-		err |= spmi_write(0x40, 0x01);  /* digital output */
+-		err |= spmi_write(0x44, 0x80);  /* inverted constant low = high */
+-	} else {
+-		err |= spmi_write(0x40, 0x11);
++		err |= spmi_write(chnl, 0x40, 0x01);    /* digital output */
++		err |= spmi_write(chnl, 0x44, 0x80);    /* inverted constant low = high */
++	} else {
++		err |= spmi_write(chnl, 0x40, 0x11);
+ 	}
+-	err |= spmi_write(0x46, 0x80);          /* enable */
++	err |= spmi_write(chnl, 0x46, 0x80);    /* enable */
+ 	uint8_t mode = 0, src = 0, en = 0;
+-	spmi_read(0x40, &mode);
+-	spmi_read(0x44, &src);
+-	spmi_read(0x46, &en);
++	spmi_read(apid, 0x40, &mode);
++	spmi_read(apid, 0x44, &src);
++	spmi_read(apid, 0x46, &en);
+ 	printf("SWEET SARGO TOUCH: PM660 GPIO 12 (1.8 V) on: subtype %#x mode %#x src %#x en %#x\n",
+ 	    sub, mode, src, en);
+ 	return err == 0;
+ }
+ 
++/* ---- keys ---- */
++
++static uint16_t key_pon = ST_NO_APID, key_volup = ST_NO_APID;
++
++static void
++keys_init(void)
++{
++	int enabled = 1;
++	uint32_t owner;
++	(void)PE_parse_boot_argn("sargokeys", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("SWEET SARGO KEYS: disabled (sargokeys=0)\n");
++		return;
++	}
++	key_pon = spmi_apid(ST_PON_PPID, &owner);
++	uint8_t sub = 0, mode = 0, en = 0;
++	vm_offset_t chnl = spmi_gpio_chnl(ST_VOLUP_PPID, "PM660L GPIO 7", &key_volup, &sub);
++	if (key_volup != ST_NO_APID) {
++		spmi_read(key_volup, 0x40, &mode);
++		spmi_read(key_volup, 0x46, &en);
++	}
++	/* input: LV/MV mode bits [1:0] = 0, older subtypes mode bits [6:4] = 0 */
++	bool input = (en & 0x80u) && (sub >= 0x10 ? (mode & 3u) == 0 : ((mode >> 4) & 7u) == 0);
++	printf("SWEET SARGO KEYS: pon apid %u, vol-up apid %u subtype %#x mode %#x en %#x\n",
++	    key_pon, key_volup, sub, mode, en);
++	if (!input && chnl) {
++		int err = spmi_write(chnl, 0x40, 0x00) | spmi_write(chnl, 0x41, 0x00) |
++		    spmi_write(chnl, 0x42, 0x00) | spmi_write(chnl, 0x46, 0x80);
++		spmi_read(key_volup, 0x40, &mode);
++		spmi_read(key_volup, 0x46, &en);
++		printf("SWEET SARGO KEYS: vol-up set to input, pull-up: err %d mode %#x en %#x\n",
++		    err, mode, en);
++	} else if (!input) {
++		key_volup = ST_NO_APID;
++	}
++}
++
++static void
++keys_poll(void)
++{
++	static int state[3];
++	uint8_t pon = 0, gpio = 0;
++	bool pok = key_pon != ST_NO_APID && !spmi_read(key_pon, 0x10, &pon);
++	bool gok = key_volup != ST_NO_APID && !spmi_read(key_volup, 0x10, &gpio);
++	/* 0 power, 1 volume up, 2 volume down (sweet_hid_key) */
++	int now[3] = {!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)};
++	bool ok[3] = {pok, gok, pok};
++	for (int k = 0; k < 3; k++) {
++		if (ok[k] && now[k] != state[k]) {
++			state[k] = now[k];
++			printf("SWEET SARGO KEYS: key=%d down=%d\n", k, state[k]);
++			sweet_hid_key(k, state[k]);
++		}
++	}
++}
++
+ /* ---- bit-banged I2C on gpio6/7 (open drain: output low or input pulled up) ---- */
+ 
+ static void
+@@ -377,22 +471,31 @@
+ {
+ 	bool down[ST_FINGERS] = {false};
+ 	unsigned tick = 0, errors = 0;
++	bool touch;
+ 	(void)arg;
+ 	(void)result;
+ 
+-	if (!st_power_on()) {
+-		return;
+-	}
+-	st_msleep(20);
+-	if (!st_ic_init()) {
++	if (!spmi_map()) {
+ 		return;
+ 	}
+-	for (;;) {
++	keys_init();
++	touch = st_touch_enabled && st_power_on();
++	if (touch) {
++		st_msleep(20);
++		touch = st_ic_init();
++	}
++	for (;; st_msleep(10), tick++) {
++		if ((tick & 1u) == 0) {
++			keys_poll();
++		}
++		if (!touch) {
++			continue;
++		}
+ 		bool any = false;
+ 		for (int i = 0; i < ST_FINGERS; i++) {
+ 			any |= down[i];
+ 		}
+-		if (any || !pin_get(ST_IRQ) || (tick++ % 10u) == 0) {
++		if (any || !pin_get(ST_IRQ) || (tick % 10u) == 0) {
+ 			uint8_t d[8 * ST_FINGERS], irq;
+ 			if (st_f01d) {
+ 				(void)rmi_read((uint8_t)(st_f01d + 1), &irq, 1);  /* clears attention */
+@@ -412,7 +515,6 @@
+ 				}
+ 			}
+ 		}
+-		st_msleep(10);
+ 	}
+ }
+ 
+@@ -427,9 +529,9 @@
+ 	}
+ 	st_started = true;
+ 	(void)PE_parse_boot_argn("sargotouch", &enabled, sizeof(enabled));
++	st_touch_enabled = enabled != 0;
+ 	if (!enabled) {
+ 		printf("SWEET SARGO TOUCH: disabled (sargotouch=0)\n");
+-		return;
+ 	}
+ 	st_tlmm = ml_io_map(ST_TLMM_PA, ST_TLMM_SIZE);
+ 	if (!st_tlmm) {
