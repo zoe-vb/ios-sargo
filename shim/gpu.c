@@ -121,7 +121,19 @@
 #define GSMMU		0x05040000UL	/* arm,smmu-kgsl (qcom,smmu-v2) */
 #define GSMMU_GR1	(GSMMU + 0x1000)
 #define GSMMU_CB(n)	(GSMMU + 0x8000 + (uintptr_t)(n) * 0x1000)	/* 4K pages, 8 global pages */
+/*
+ * t15b hung in AUTH_AND_RESET with GMU and GPU both on CB 1. Downstream
+ * KGSL gives gfx3d_user CB 0 and the secure bank(s) come next; TZ likely
+ * programs a secure bank for stream 2 itself. GPU=zap: GPU on CB 0, GMU
+ * on CB 3, CBs 1/2 left alone.
+ */
+#ifdef GPU_ZAP
+#define GMU_CB		3
+#define GPU_CB		0
+#else
 #define GMU_CB		1
+#define GPU_CB		GMU_CB
+#endif
 #define GMU_IOVA	0x60000000u
 
 #define CLK_OFF		(1u << 31)	/* CBCR status */
@@ -242,23 +254,13 @@ static int gmu_clock_200(void)
 	return ok;
 }
 
-/* Stage-1 context bank GMU_CB, VA 32 bits, 4K granule, start level 1. */
-static int gsmmu_map_gmu(void)
+/* Stage-1 context bank n over pt_l1, VA 32 bits, 4K granule, start level 1. */
+static int cb_program(unsigned n)
 {
-	uintptr_t cb = GSMMU_CB(GMU_CB);
-	pt_l1[GMU_IOVA >> 30] = (uintptr_t)pt_l2 | 3u;
-	pt_l2[(GMU_IOVA >> 21) & 511] = (uintptr_t)pt_l3 | 3u;
-	for (unsigned i = 0; i < sizeof(gmu_mem) / 4096; i++)	/* AF, AP=01 (RW), attr 0 */
-		pt_l3[((GMU_IOVA >> 12) & 511) + i] = ((uintptr_t)gmu_mem + i * 4096u) | (1u << 10) | (1u << 6) | 3u;
-#ifdef GPU_CP
-	for (unsigned i = 0; i < sizeof(gpu_mem) / 4096; i++)
-		pt_l3[((GPU_IOVA >> 12) & 511) + i] = ((uintptr_t)gpu_mem + i * 4096u) | (1u << 10) | (1u << 6) | 3u;
-#endif
-	__asm__ volatile("dsb sy" ::: "memory");
-
+	uintptr_t cb = GSMMU_CB(n);
 	wr(cb + 0x00, 0);				/* SCTLR off while programming */
-	wr(GSMMU_GR1 + 0x800 + 4 * GMU_CB, 1u);	/* CBA2R: AArch64 descriptors */
-	wr(GSMMU_GR1 + 4 * GMU_CB, 1u << 16);		/* CBAR: S1 translate, S2 bypass */
+	wr(GSMMU_GR1 + 0x800 + 4 * n, 1u);		/* CBA2R: AArch64 descriptors */
+	wr(GSMMU_GR1 + 4 * n, 1u << 16);		/* CBAR: S1 translate, S2 bypass */
 	wr(cb + 0x10, 2u);				/* TCR2: 40-bit PA */
 	wr(cb + 0x20, (uint32_t)(uintptr_t)pt_l1);	/* TTBR0, ASID 0 */
 	wr(cb + 0x24, (uint32_t)((uint64_t)(uintptr_t)pt_l1 >> 32));
@@ -270,9 +272,23 @@ static int gsmmu_map_gmu(void)
 	wr(cb + 0x7f0, 0);				/* TLBSYNC */
 	wait_bits(cb + 0x7f4, 1u, 0);
 	wr(cb + 0x00, 0x67u);				/* M, TRE, AFE, CFRE, CFIE */
-	DETAIL(con_hex2(" cb1", "cbar=", rd(GSMMU_GR1 + 4 * GMU_CB), "sctlr=", rd(cb)));
-	DETAIL(con_hex2(" cb1", "ttbr0=", rd(cb + 0x20), "tcr=", rd(cb + 0x30)));
-	if (!(rd(cb) & 1u) || rd(cb + 0x20) != (uint32_t)(uintptr_t)pt_l1)
+	DETAIL(con_hex2(" cb", "cbar=", rd(GSMMU_GR1 + 4 * n), "sctlr=", rd(cb)));
+	DETAIL(con_hex2(" cb", "ttbr0=", rd(cb + 0x20), "tcr=", rd(cb + 0x30)));
+	return (rd(cb) & 1u) && rd(cb + 0x20) == (uint32_t)(uintptr_t)pt_l1;
+}
+
+static int gsmmu_map_gmu(void)
+{
+	pt_l1[GMU_IOVA >> 30] = (uintptr_t)pt_l2 | 3u;
+	pt_l2[(GMU_IOVA >> 21) & 511] = (uintptr_t)pt_l3 | 3u;
+	for (unsigned i = 0; i < sizeof(gmu_mem) / 4096; i++)	/* AF, AP=01 (RW), attr 0 */
+		pt_l3[((GMU_IOVA >> 12) & 511) + i] = ((uintptr_t)gmu_mem + i * 4096u) | (1u << 10) | (1u << 6) | 3u;
+#ifdef GPU_CP
+	for (unsigned i = 0; i < sizeof(gpu_mem) / 4096; i++)
+		pt_l3[((GPU_IOVA >> 12) & 511) + i] = ((uintptr_t)gpu_mem + i * 4096u) | (1u << 10) | (1u << 6) | 3u;
+#endif
+	__asm__ volatile("dsb sy" ::: "memory");
+	if (!cb_program(GMU_CB) || (GPU_CB != GMU_CB && !cb_program(GPU_CB)))
 		return 0;
 	/*
 	 * t11: an SMR for streams 4+5 (id 4, mask 1) read back 0 while its
@@ -282,7 +298,7 @@ static int gsmmu_map_gmu(void)
 	static const struct { uint8_t slot, sid; } try[] = { {0, 5}, {1, 4}, {4, 5}, {3, 4}, {2, 5} };
 #ifdef GPU_CP
 	/* GPU (gfx3d_user) stream 0, exact, slot 2 */
-	wr(GSMMU + 0xc00 + 4 * 2, GMU_CB);
+	wr(GSMMU + 0xc00 + 4 * 2, GPU_CB);
 	wr(GSMMU + 0x800 + 4 * 2, 1u << 31);
 	con_hex2(" smr2", "smr=", rd(GSMMU + 0x808), "s2cr=", rd(GSMMU + 0xc08));
 #endif
@@ -493,9 +509,14 @@ static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1,
 	register uint64_t x5 __asm__("x5") = 0;
 	register uint64_t x6 __asm__("x6") = 0;
 	for (unsigned tries = 0; tries < 20; tries++) {
-		x0 = 0x42000000u | svc_cmd; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = 0; x6 = 0;
-		__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
-		    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+		uint64_t fn = 0x42000000u | svc_cmd, sess = 0;
+		do {	/* QCOM_SCM_INTERRUPTED (1): resume with x0 = 1, x6 as returned */
+			x0 = fn; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = 0; x6 = sess;
+			__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
+			    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+			fn = 1;
+			sess = x6;
+		} while (x0 == 1);
 		if ((int64_t)x0 != -12)		/* QCOM_SCM_V2_EBUSY */
 			break;
 		udelay(30000);
@@ -544,6 +565,9 @@ static int zap_load(void)
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
 	con_hex2(" region", "copied0=", dst[0], "step=", 3);
+	gmu_oob(" oob gpu2", 16, 24);
+	con_hex2(" gx", "sptprac=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)), "trust=", rd(GPU + 0xf400 * 4));
+	con_hex2(" cb1/2", "sctlr1=", rd(GSMMU_CB(1)), "sctlr2=", rd(GSMMU_CB(2)));
 	con_str(" pas", "AUTH_AND_RESET...");
 	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
 	con_hex2(" pas", "auth=", (uint32_t)rr, "word0=", *(volatile uint32_t *)ZAP_REGION);
@@ -625,7 +649,7 @@ static void cp_test(void)
 	con_hex2(" target", "value=", got, "rbbm=", gpu_r(RBBM_STATUS));
 	CPDETAIL(con_hex2(" fault", "cphw=", gpu_r(0x0821), "int0=", gpu_r(RBBM_INT_0_STATUS)));
 	CPDETAIL(con_hex2(" cp", "status1=", gpu_r(0x0825), "trust=", gpu_r(0xf400)));
-	CPDETAIL(con_hex2(" cb1", "fsr=", rd(GSMMU_CB(GMU_CB) + 0x58), "far=", rd(GSMMU_CB(GMU_CB) + 0x60)));
+	CPDETAIL(con_hex2(" cb1", "fsr=", rd(GSMMU_CB(GPU_CB) + 0x58), "far=", rd(GSMMU_CB(GPU_CB) + 0x60)));
 	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
 #ifdef GPU_ZAP
 	if (got != 0xc0ffee15u || !zap_load())
