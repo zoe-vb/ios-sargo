@@ -216,7 +216,15 @@ gfx.lvl and mx.lvl 16 entries each, gfx starts 0, 0x10, 0x30, 0x40 -> MIN_SVS (4
 OOB BOOT_SLUMBER acked (g2h 0x40000000), SPTPRAC on (status 0x28), HFI_CTRL_STATUS 1, OOB GPU_SET acked
 (g2h 0x01000000); GX GDSCR 0xf8222000 (on); RBBM_STATUS and INT_0 read, CP_SCRATCH0 write 0x615c0de5 reads
 back. Next: GPU SMMU for GPU stream 0 (exact SMR), a630_sqe.fw into CP, CP init + ring test (CP_ME_INIT,
-CP_MEM_WRITE), then the a615 zap shader via TZ (PAS id 13) to leave secure mode.
+CP_MEM_WRITE), then the a615 zap shader via TZ (PAS id 13) to leave secure mode. **t14 (7aa88d6, IMG_0066)**: output ran off the screen
+at the RBBM line; OOB GPU_SET not acked that time (g2h 0x00800000, t13 had 0x01000000), GX on anyway.
+**t14b (58d64b8, IMG_0067): RING TEST PASSED - the GPU executed commands and wrote memory.** GPU SMR2 =
+stream 0 exact (0x80000000) -> CB 1; SQE fw 0x7a54 bytes (word1 0x016ee176), loaded minus the first dword;
+CP_ME_INIT + CP_MEM_WRITE: RPTR = WPTR = 0xd within ~9 ms, target 0xc0ffee15 (was 0xdeadbeef);
+CP_HW_FAULT 0, RBBM_INT_0 0, CP_STATUS_1 0x01000000, RBBM_SECVID_TRUST_CNTL 1 (still secure, as
+ios-sailfish saw on a5xx), CB 1 FSR 0x400 (no fault). OOB GPU_SET again unacked (g2h 0x00800000).
+Next: zap shader via TZ (qcom_scm PAS init/mem/auth for PAS 13 from a615_zap.mdt/.b0x) and
+CP_SET_SECURE_MODE 0; then move the bring-up into XNU (SweetGPU + msm-style user client, as ios-sailfish).
 
 ## Stage plan
 
