@@ -170,6 +170,11 @@ apps_smmu (qsmmu-v500, 0x15000000) sCR0 0x00200406 = enabled + USFCFG (unmatched
 ~1 ms of the first doorbell (t04/t05). t06 dump: the firmware's own routing - eMMC SID 0x140/0xf,
 0x0a0/0xf, 0x0c0/0xf -> CB 0 (CBAR 0x10000, SCTLR 0xe0, i.e. untranslated); 0x100/0xf -> CB 1;
 0x740 -> CB 2; 0x880/0x8, 0xc80/0x8 -> CB 3 (CBAR 0x10003). t07 routes 0x6d6 to CB 0.
+t07 froze the SoC (manual fastboot). t08 (`TOUCH=bb`, bit-banged I2C on gpio6/7): SDA/SCL read 0 with
+pull-ups on, ABL left all four touch pins pulled down: IC unpowered (t08's ACK was SDA stuck low).
+t09 turns on PM660 GPIO 12 (ts_1p8 vio, PPID 0x0cb) over the SPMI arbiter v5 RW channel
+(0xc600000 + 0x10000*apid; EXT_WRITEL, MODE 0x40=1, OUT_SRC 0x44=0x80, EN 0x46=0x80): **touch data reads
+live** (user report). No GPI/SMMU needed: bit-banged I2C at ~50 kHz is enough for polling.
 
 ## Stage plan
 
