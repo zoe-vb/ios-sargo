@@ -120,6 +120,13 @@
 #define GDSC_PWR_ON	(1u << 31)
 #define GDSC_COLLAPSE	(1u << 0)
 
+/* GPU=cp needs the screen for the ring test: earlier stages' details off */
+#ifdef GPU_CP
+#define DETAIL(stmt)	do { if (0) { stmt; } } while (0)
+#else
+#define DETAIL(stmt)	do { stmt; } while (0)
+#endif
+
 static inline uint32_t rd(uintptr_t a) { return *(volatile uint32_t *)a; }
 static inline void wr(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; __asm__ volatile("dsb sy" ::: "memory"); }
 
@@ -155,7 +162,7 @@ static int branch_on(const char *label, uintptr_t cbcr, int voted)
 	if (!(before & 1u))
 		wr(cbcr, before | 1u);
 	int ok = voted ? 1 : wait_bits(cbcr, CLK_OFF, 0);
-	con_hex2(label, "was=", before, "now=", rd(cbcr) | (ok ? 0 : 0xbad00000u));
+	DETAIL(con_hex2(label, "was=", before, "now=", rd(cbcr) | (ok ? 0 : 0xbad00000u)));
 	return ok;
 }
 
@@ -212,7 +219,7 @@ static int gmu_clock_200(void)
 	wr(GPUCC + GPUCC_GMU_RCG + 4, (6u << 8) | 2u);
 	wr(GPUCC + GPUCC_GMU_RCG, rd(GPUCC + GPUCC_GMU_RCG) | 1u);
 	int ok = wait_bits(GPUCC + GPUCC_GMU_RCG, 1u, 0);
-	con_hex2(" rcg200", "cmd=", rd(GPUCC + GPUCC_GMU_RCG), "cfg=", rd(GPUCC + GPUCC_GMU_RCG + 4));
+	DETAIL(con_hex2(" rcg200", "cmd=", rd(GPUCC + GPUCC_GMU_RCG), "cfg=", rd(GPUCC + GPUCC_GMU_RCG + 4)));
 	return ok;
 }
 
@@ -244,8 +251,8 @@ static int gsmmu_map_gmu(void)
 	wr(cb + 0x7f0, 0);				/* TLBSYNC */
 	wait_bits(cb + 0x7f4, 1u, 0);
 	wr(cb + 0x00, 0x67u);				/* M, TRE, AFE, CFRE, CFIE */
-	con_hex2(" cb1", "cbar=", rd(GSMMU_GR1 + 4 * GMU_CB), "sctlr=", rd(cb));
-	con_hex2(" cb1", "ttbr0=", rd(cb + 0x20), "tcr=", rd(cb + 0x30));
+	DETAIL(con_hex2(" cb1", "cbar=", rd(GSMMU_GR1 + 4 * GMU_CB), "sctlr=", rd(cb)));
+	DETAIL(con_hex2(" cb1", "ttbr0=", rd(cb + 0x20), "tcr=", rd(cb + 0x30)));
 	if (!(rd(cb) & 1u) || rd(cb + 0x20) != (uint32_t)(uintptr_t)pt_l1)
 		return 0;
 	/*
@@ -338,7 +345,7 @@ static void gmu_rpmh_init(void)
 	wr(PDC_REG(0x15db + 8), 3);
 	wr(PDC_REG(0x1148), 0);			/* GPU_SEQ_START_ADDR */
 	wr(PDC_REG(0x1140), 0x80000001u);	/* GPU_ENABLE_PDC */
-	con_hex2(" pdc", "en=", rd(PDC_REG(0x1140)), "rscseq=", rd(RSCC_REG(0x0180)));
+	DETAIL(con_hex2(" pdc", "en=", rd(PDC_REG(0x1140)), "rscseq=", rd(RSCC_REG(0x0180))));
 }
 
 /* Linux cmd_db_read_aux_data(): the ARC level list of an RPMh resource */
@@ -381,7 +388,7 @@ static int gx_vote(unsigned level, unsigned *gx, unsigned *mx)
 		return 0;
 	}
 	con_hex2("CMDDB", "gfx n=", np, "mx n=", ns);
-	con_hex2(" gfx", "l0-3=", (uint32_t)pri[0] << 16 | pri[1 % np], "l2-3=", (uint32_t)pri[2 % np] << 16 | pri[3 % np]);
+	DETAIL(con_hex2(" gfx", "l0-3=", (uint32_t)pri[0] << 16 | pri[1 % np], "l2-3=", (uint32_t)pri[2 % np] << 16 | pri[3 % np]));
 	*gx = np;
 	for (unsigned j = 0; j < np; j++)
 		if (pri[j] >= level) {
@@ -601,7 +608,7 @@ static void gmu_boot(void)
 	uint32_t bad = 0;
 	for (uint32_t i = 0; i < size / 4; i++)
 		bad += rd(GMU_REG(GMU_CM3_ITCM_START + i)) != ((const uint32_t *)gmu_fw)[i];
-	con_hex2(" itcm", "mismatch=", bad, "dtcm+ff8=", rd(GMU_REG(GMU_CM3_DTCM_START + 0xff8)));
+	DETAIL(con_hex2(" itcm", "mismatch=", bad, "dtcm+ff8=", rd(GMU_REG(GMU_CM3_DTCM_START + 0xff8))));
 
 	wr(GMU_REG(GMU_CM3_FW_INIT_RESULT), 0);
 	wr(GMU_REG(GMU_CM3_BOOT_CONFIG), 2);
@@ -635,10 +642,10 @@ static void gmu_boot(void)
 		udelay(1000);
 	}
 	con_hex2("GMU", "init=", res, "ms=", ms);
-	con_hex2(" fw", "version=", rd(GMU_REG(GMU_CORE_FW_VERSION)), "hfi=", rd(GMU_REG(GMU_HFI_CTRL_STATUS)));
-	con_hex2(" intr", "g2h=", rd(GMU_REG(GMU_GMU2HOST_INTR_INFO)), "ao=", rd(GMU_REG(GMU_AO_HOST_INTR_STATUS)));
+	DETAIL(con_hex2(" fw", "version=", rd(GMU_REG(GMU_CORE_FW_VERSION)), "hfi=", rd(GMU_REG(GMU_HFI_CTRL_STATUS))));
+	DETAIL(con_hex2(" intr", "g2h=", rd(GMU_REG(GMU_GMU2HOST_INTR_INFO)), "ao=", rd(GMU_REG(GMU_AO_HOST_INTR_STATUS))));
 	con_hex2(" cb1", "fsr=", rd(GSMMU_CB(GMU_CB) + 0x58), "far=", rd(GSMMU_CB(GMU_CB) + 0x60));
-	con_hex2(" mem", "log0=", *(volatile uint32_t *)(gmu_mem + 0x5000), "hfi0=", *(volatile uint32_t *)(gmu_mem + 0x1000));
+	DETAIL(con_hex2(" mem", "log0=", *(volatile uint32_t *)(gmu_mem + 0x5000), "hfi0=", *(volatile uint32_t *)(gmu_mem + 0x1000)));
 	con_str("GMU", res == 0xbabefaceu ? "FIRMWARE RUNNING" : "no 0xbabeface");
 #ifdef GPU_GX_ON
 	if (res == 0xbabefaceu)
@@ -650,7 +657,7 @@ static void gmu_boot(void)
 void test_gpu(void)
 {
 	con_str("GPU", "Adreno 615 probe t10 (read-mostly)");
-	con_hex2("GCC", "vote1=", rd(GCC + GCC_VOTE_1), "axi=", rd(GCC + GCC_DDRSS_GPU_AXI));
+	DETAIL(con_hex2("GCC", "vote1=", rd(GCC + GCC_VOTE_1), "axi=", rd(GCC + GCC_DDRSS_GPU_AXI)));
 	if (!branch_on(" cfgahb", GCC + GCC_GPU_CFG_AHB, 0)) {
 		con_str("GPU", "gpu_cfg_ahb_clk stays off: GPU CC unreachable, stop");
 		return;
@@ -660,10 +667,10 @@ void test_gpu(void)
 	branch_on(" snocdvm", GCC + GCC_GPU_SNOC_DVM, 0);
 	udelay(10);
 
-	con_hex2("GPUCC", "cx=", rd(GPUCC + GPUCC_CX_GDSCR), "gx=", rd(GPUCC + GPUCC_GX_GDSCR));
-	con_hex2(" gmuclk", "cbcr=", rd(GPUCC + GPUCC_CX_GMU_CBCR), "cxo=", rd(GPUCC + GPUCC_CXO_CBCR));
-	con_hex2(" rcg", "cmd=", rd(GPUCC + GPUCC_GMU_RCG), "cfg=", rd(GPUCC + GPUCC_GMU_RCG + 4));
-	con_hex2(" pll1", "mode=", rd(GPUCC + GPUCC_PLL1_MODE), "hwctl=", rd(GPUCC + GPUCC_CX_GDS_HW_CTRL));
+	DETAIL(con_hex2("GPUCC", "cx=", rd(GPUCC + GPUCC_CX_GDSCR), "gx=", rd(GPUCC + GPUCC_GX_GDSCR)));
+	DETAIL(con_hex2(" gmuclk", "cbcr=", rd(GPUCC + GPUCC_CX_GMU_CBCR), "cxo=", rd(GPUCC + GPUCC_CXO_CBCR)));
+	DETAIL(con_hex2(" rcg", "cmd=", rd(GPUCC + GPUCC_GMU_RCG), "cfg=", rd(GPUCC + GPUCC_GMU_RCG + 4)));
+	DETAIL(con_hex2(" pll1", "mode=", rd(GPUCC + GPUCC_PLL1_MODE), "hwctl=", rd(GPUCC + GPUCC_CX_GDS_HW_CTRL)));
 
 	/* CX GDSC on, as gdsc_enable() for gpu_cx_gdsc */
 	uint32_t cx = rd(GPUCC + GPUCC_CX_GDSCR);
@@ -671,7 +678,7 @@ void test_gpu(void)
 		wr(GPUCC + GPUCC_CX_GDSCR, cx & ~GDSC_COLLAPSE);
 	int cx_on = wait_bits(GPUCC + GPUCC_CX_GDSCR, GDSC_PWR_ON, GDSC_PWR_ON) &&
 	    wait_bits(GPUCC + GPUCC_CX_GDS_HW_CTRL, GDSC_PWR_ON, GDSC_PWR_ON);
-	con_hex2("CXGDSC", "gdscr=", rd(GPUCC + GPUCC_CX_GDSCR), "hwctl=", rd(GPUCC + GPUCC_CX_GDS_HW_CTRL));
+	DETAIL(con_hex2("CXGDSC", "gdscr=", rd(GPUCC + GPUCC_CX_GDSCR), "hwctl=", rd(GPUCC + GPUCC_CX_GDS_HW_CTRL)));
 	if (!cx_on) {
 		con_str("GPU", "CX GDSC did not report power on: stop");
 		return;
@@ -682,15 +689,15 @@ void test_gpu(void)
 		return;
 	}
 
-	smmu_dump(GSMMU);
-	con_hex2("GSMMU", "cb1 sctlr=", rd(GSMMU_CB(GMU_CB)), "cbar=", rd(GSMMU_GR1 + 4 * GMU_CB));
+	DETAIL(smmu_dump(GSMMU));
+	DETAIL(con_hex2("GSMMU", "cb1 sctlr=", rd(GSMMU_CB(GMU_CB)), "cbar=", rd(GSMMU_GR1 + 4 * GMU_CB)));
 
-	con_hex2("GMU", "sysreset=", rd(GMU_REG(GMU_CM3_SYSRESET)),
-	    "bootcfg=", rd(GMU_REG(GMU_CM3_BOOT_CONFIG)));
-	con_hex2(" fw", "busy=", rd(GMU_REG(GMU_CM3_FW_BUSY)),
-	    "init=", rd(GMU_REG(GMU_CM3_FW_INIT_RESULT)));
-	con_hex2(" fw", "version=", rd(GMU_REG(GMU_CORE_FW_VERSION)),
-	    "cm3cfg=", rd(GMU_REG(GMU_CM3_CFG)));
+	DETAIL(con_hex2("GMU", "sysreset=", rd(GMU_REG(GMU_CM3_SYSRESET)),
+	    "bootcfg=", rd(GMU_REG(GMU_CM3_BOOT_CONFIG))));
+	DETAIL(con_hex2(" fw", "busy=", rd(GMU_REG(GMU_CM3_FW_BUSY)),
+	    "init=", rd(GMU_REG(GMU_CM3_FW_INIT_RESULT))));
+	DETAIL(con_hex2(" fw", "version=", rd(GMU_REG(GMU_CORE_FW_VERSION)),
+	    "cm3cfg=", rd(GMU_REG(GMU_CM3_CFG))));
 #ifdef GPU_GMU_BOOT
 	gmu_boot();
 #endif
