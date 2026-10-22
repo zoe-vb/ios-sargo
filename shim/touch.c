@@ -3,11 +3,13 @@
  * RMI4 at 0x20 on i2c9 = QUP wrapper 1 SE1 at 0xa84000, the same engine,
  * GCC clock registers and SDA/SCL pins (gpio6/7, function 1) as sweet's
  * touch bus. Reset is gpio99, IRQ gpio125 (Linux sdm670-google-common).
- * GENI sequences follow xnu bsd/dev/sweet_touch.c (Linux geni-i2c).
+ * Unlike sweet, this SE's FIFO interface is disabled (t01): transfers go
+ * through the GPI DMA engine, see gpi_init() below.
  *
- * Writes only: GCC clock vote/RCG, TLMM pin config, GENI registers, and on
- * the touch IC the RMI4 page select register (0xff = 0). No PMIC writes:
- * if the IC does not answer, its 1.8 V (PM660 GPIO 12) is probably off.
+ * Writes only: GCC clock vote/RCG, TLMM pin config, GENI and GPI (GPII 1)
+ * registers, and on the touch IC the RMI4 page select register (0xff = 0).
+ * No PMIC writes: if the IC does not answer, its 1.8 V (PM660 GPIO 12) is
+ * probably off.
  *
  * MMU off: aligned 32-bit accesses only (Device memory).
  */
@@ -140,125 +142,294 @@ static int clocks(void)
 	return 1;
 }
 
-static int se_init(void)
+/*
+ * t01 showed GENI_IF_DISABLE_RO (0x64) bit 0: the FIFO interface of this SE
+ * is disabled by the QUP firmware, so every transfer goes through the GPI DMA
+ * engine (GSI) of QUP wrapper 1: 0xa00000, apps GPIIs 0xfa (stock DT
+ * qcom,gpi-dma@0xa00000; i2c9 dmas = <&gpi 0/1 1 3 64 0>: tx/rx, SE 1, I2C).
+ * The SE goes to GPI DMA mode (Linux geni_se_select_gpi_mode); GPII 1 gets
+ * one event ring and a TX/RX channel pair (Linux qcom/gpi.c gpi_ch_init),
+ * polled instead of an interrupt. Transfers are built like Linux
+ * geni_i2c_gpi_xfer: CONFIG0 + GO + DMA TREs.
+ */
+#define GPI_BASE	0x00a00000UL
+#define GPII		1
+#define GN		(GPI_BASE + 0x4000UL * GPII)
+#define CH_CTX(k)	(GN + 0x20000 + 0x80 * (k))
+#define CH_QOS(k)	(GN + 0x2005c + 0x80 * (k))
+#define CH_SCRATCH(k, i)	(GN + 0x20060 + 0x80 * (k) + 4 * (i))
+#define EV_CTX		(GN + 0x21000)
+#define CH_DB(k)	(GN + 0x22000 + 8 * (k))
+#define EV_DB		(GN + 0x22100)
+#define CH_CMD		(GN + 0x23008)
+#define EV_CMD		(GN + 0x23010)
+#define TYPE_IRQ	(GN + 0x23080)
+#define TYPE_IRQ_MSK	(GN + 0x23088)
+#define SRC_CH_IRQ	(GN + 0x23090)
+#define SRC_CH_IRQ_MSK	(GN + 0x23098)
+#define SRC_EV_IRQ_MSK	(GN + 0x2309c)
+#define SRC_CH_IRQ_CLR	(GN + 0x230a0)
+#define SRC_EV_IRQ_CLR	(GN + 0x230a4)
+#define SRC_IEOB_MSK	(GN + 0x230b8)
+#define SRC_IEOB_CLR	(GN + 0x230c0)
+#define GLOB_IRQ_STTS	(GN + 0x23100)
+#define GLOB_IRQ_EN	(GN + 0x23108)
+#define GPII_IRQ_STTS	(GN + 0x23118)
+#define GPII_IRQ_EN	(GN + 0x23120)
+#define INTSET		(GN + 0x23180)
+#define MSI_LSB		(GN + 0x23188)
+#define MSI_MSB		(GN + 0x2318c)
+#define CNTXT_SCRATCH0	(GN + 0x23400)
+#define CNTXT_SCRATCH1	(GN + 0x23404)
+#define ERROR_LOG	(GN + 0x23200)
+
+#define CTX_RLEN	0x04
+#define CTX_BASE_LO	0x08
+#define CTX_BASE_HI	0x0c
+#define CTX_RP_LO	0x10
+#define CTX_INT_MOD	0x20
+#define CTX_MSI_LO	0x28
+#define CTX_MSI_HI	0x2c
+#define CTX_RPU_LO	0x30
+#define CTX_RPU_HI	0x34
+#define CHSTATE(v)	(((v) >> 20) & 0xf)
+
+#define TRE_DMA		0x10
+#define TRE_GO		0x20
+#define TRE_CONFIG0	0x22
+#define F_CHAIN		(1u << 0)
+#define F_IEOT		(1u << 9)
+#define F_LINK		(1u << 11)
+#define I2C_WR		1
+#define I2C_RD		2
+
+#define RING_N		16			/* TREs per channel ring */
+#define EV_N		64
+static uint32_t tx_ring[RING_N * 4] __attribute__((aligned(RING_N * 16)));
+static uint32_t rx_ring[RING_N * 4] __attribute__((aligned(RING_N * 16)));
+static uint32_t ev_ring[EV_N * 4] __attribute__((aligned(EV_N * 16)));
+static uint8_t xbuf[128] __attribute__((aligned(64)));
+static unsigned tx_wp, rx_wp, ev_rp, ev_wp;
+static uint32_t last_ev[4];
+
+static uintptr_t pa(const void *p) { return (uintptr_t)p; }	/* MMU off: VA == PA */
+
+static void gpi_dump(const char *why)
 {
-	uint32_t fw = rd(SE_PA + SE_FW), tx = rd(SE_PA + SE_HW_TX), rx = rd(SE_PA + SE_HW_RX);
-	con_hex2("SE", "fw=", fw, "status=", rd(SE_PA + SE_STATUS));
-	con_hex2(" fifo", "tx=", tx, "rx=", rx);
-	if (((fw >> 8) & 0xff) != 3 || (rd(SE_PA + 0x64) & 1) ||
-	    ((tx >> 24) & 0x3f) != 32 || ((rx >> 24) & 0x3f) != 32 ||
-	    ((tx >> 16) & 0x3f) < 2 || ((rx >> 16) & 0x3f) < 2) {
-		con_str("SE", "no I2C firmware / FIFO");
-		return 0;
+	con_str("GPI", why);
+	con_hex2(" ch", "tx=", rd(CH_CTX(0)), "rx=", rd(CH_CTX(1)));
+	con_hex2(" ev", "ctx=", rd(EV_CTX), "rp=", rd(EV_CTX + CTX_RP_LO));
+	con_hex2(" ch rp", "tx=", rd(CH_CTX(0) + CTX_RP_LO), "rx=", rd(CH_CTX(1) + CTX_RP_LO));
+	con_hex2(" irq", "type=", rd(TYPE_IRQ), "glob=", rd(GLOB_IRQ_STTS));
+	con_hex2(" err", "log=", rd(ERROR_LOG), "gpii=", rd(GPII_IRQ_STTS));
+	con_hex2(" last ev", "w2=", last_ev[2], "w3=", last_ev[3]);
+}
+
+/* Command, then poll the context state (Linux waits for the CH/EV ctrl IRQ). */
+static int gpi_cmd(uintptr_t cmd_reg, uint32_t cmd, uintptr_t ctx, uint32_t want)
+{
+	wr(cmd_reg, cmd);
+	uint64_t end = ticks() + 250ull * TICKS_PER_MS;
+	while (ticks() < end) {
+		if (CHSTATE(rd(ctx)) == want) {
+			wr(SRC_CH_IRQ_CLR, rd(SRC_CH_IRQ));
+			wr(SRC_EV_IRQ_CLR, 0xffffffffu);
+			return 1;
+		}
+		udelay(10);
 	}
-	if (rd(SE_PA + SE_STATUS) & 0x1001) {
-		con_str("SE", "busy");
-		return 0;
-	}
-	wr(SE_PA + 0xe18, 0);
-	wr(SE_PA + 0xe1c, 0);
-	wr(SE_PA + 0x644, 0);
+	return 0;
+}
+
+static void se_gsi_mode(void)
+{
 	wr(SE_PA + SE_IRQ_CLR, 0xffffffffu);
-	wr(SE_PA + 0x648, 0xffffffffu);
-	wr(SE_PA + SE_DMA, 0);
-	wr(SE_PA + 0x28, rd(SE_PA + 0x28) | 0x7f);
-	wr(SE_PA + 0xe30, rd(SE_PA + 0xe30) | 0x0f);
-	wr(SE_PA + 0x24, 0x7f);
-	wr(SE_PA + 0x20, 1);
+	wr(SE_PA + 0x648, 0xffffffffu);		/* S IRQ clear */
+	wr(SE_PA + 0xe1c, 0);			/* SE_IRQ_EN */
+	wr(SE_PA + SE_IRQ_EN, rd(SE_PA + SE_IRQ_EN) & ~(SE_DONE | SE_TX_WM_IRQ | SE_RX_WM_IRQ | SE_RX_LAST));
+	wr(SE_PA + SE_DMA, 1);			/* SE_GENI_DMA_MODE_EN */
+	wr(SE_PA + 0xe18, rd(SE_PA + 0xe18) | 0xf);	/* SE_GSI_EVENT_EN: DMA rx/tx, M, S */
 	wr(SE_PA + SE_CLK_SEL, 0);
 	wr(SE_PA + SE_MCLK, (7u << 4) | 1u);
-	wr(SE_PA + SE_SCL, (10u << 20) | (11u << 10) | 26u);	/* 100 kHz from 19.2 MHz */
-	wr(SE_PA + 0x254, 0);
-	wr(SE_PA + 0x260, SE_PACK0);
-	wr(SE_PA + 0x264, SE_PACK1);
-	wr(SE_PA + 0x284, SE_PACK0);
-	wr(SE_PA + 0x288, SE_PACK1);
-	wr(SE_PA + SE_TX_WM, 0);
-	wr(SE_PA + 0x810, 0);
-	wr(SE_PA + 0x814, ((rx >> 16) & 0x3f) - 1);
-	wr(SE_PA + SE_IRQ_EN, SE_EVENTS);
-	if (rd(SE_PA + 0x260) != SE_PACK0 || rd(SE_PA + 0x284) != SE_PACK0 ||
-	    (rd(SE_PA + SE_TX_COUNT) & 0xfffffff) || (rd(SE_PA + SE_RX_COUNT) & 0x1ffffff)) {
-		con_str("SE", "packing/FIFO check failed");
+}
+
+static int gpi_init(void)
+{
+	uint32_t fw = rd(SE_PA + SE_FW);
+	con_hex2("SE", "fw=", fw, "ifdis=", rd(SE_PA + 0x64));
+	if (((fw >> 8) & 0xff) != 3 || !(rd(SE_PA + 0x64) & 1)) {
+		con_str("SE", "not an I2C SE in GSI mode");
 		return 0;
 	}
+	con_hex2("GPII1", "tx=", rd(CH_CTX(0)), "rx=", rd(CH_CTX(1)));
+	con_hex2(" ev", "ctx=", rd(EV_CTX), "errlog=", rd(ERROR_LOG));
+	/* Left allocated by the bootloader? reset + de-allocate first. */
+	for (unsigned k = 0; k < 2; k++)
+		if (CHSTATE(rd(CH_CTX(k)))) {
+			if (CHSTATE(rd(CH_CTX(k))) == 2)
+				gpi_cmd(CH_CMD, 2u << 24 | k, CH_CTX(k), 3);	/* STOP */
+			gpi_cmd(CH_CMD, 9u << 24 | k, CH_CTX(k), 1);		/* RESET */
+			wr(CH_CMD, 10u << 24 | k);				/* DE_ALLOC */
+			mdelay(5);
+		}
+	if (CHSTATE(rd(EV_CTX))) {
+		gpi_cmd(EV_CMD, 9u << 24, EV_CTX, 1);
+		wr(EV_CMD, 10u << 24);
+		mdelay(5);
+	}
+	se_gsi_mode();
+
+	/* gpi_config_interrupts(DEFAULT): masks and INTSET as Linux; no GIC IRQ used */
+	wr(TYPE_IRQ_MSK, 0x4f);
+	wr(SRC_IEOB_MSK, 1);
+	wr(SRC_CH_IRQ_MSK, 3);
+	wr(SRC_EV_IRQ_MSK, 1);
+	wr(GLOB_IRQ_EN, 0xf);
+	wr(GPII_IRQ_EN, 0xf);
+	wr(MSI_LSB, 0);
+	wr(MSI_MSB, 0);
+	wr(CNTXT_SCRATCH0, 0);
+	wr(CNTXT_SCRATCH1, 0);
+	wr(INTSET, 1);
+	wr(ERROR_LOG, 0);
+
+	/* event ring (gpi_alloc_ev_chan) */
+	for (unsigned i = 0; i < EV_N * 4; i++)
+		ev_ring[i] = 0;
+	if (!gpi_cmd(EV_CMD, 0, EV_CTX, 1)) {
+		gpi_dump("EV allocate timeout");
+		return 0;
+	}
+	wr(EV_CTX, 16u << 24 | 1u << 16 | 2u);		/* el size 16, IRQ type, GPI event */
+	wr(EV_CTX + CTX_RLEN, EV_N * 16);
+	wr(EV_CTX + CTX_BASE_LO, (uint32_t)pa(ev_ring));
+	wr(EV_CTX + CTX_BASE_HI, (uint32_t)(pa(ev_ring) >> 32));
+	wr(EV_DB + 4, (uint32_t)(pa(ev_ring) >> 32));
+	wr(EV_CTX + CTX_INT_MOD, 0);
+	wr(EV_CTX + CTX_MSI_LO, 0);
+	wr(EV_CTX + CTX_MSI_HI, 0);
+	wr(EV_CTX + CTX_RPU_LO, 0);
+	wr(EV_CTX + CTX_RPU_HI, 0);
+	ev_rp = 0;
+	ev_wp = EV_N - 1;
+	wr(EV_DB, (uint32_t)pa(&ev_ring[ev_wp * 4]));
+
+	/* channels (gpi_alloc_chan): 0 = TX (dir out), 1 = RX (dir in) */
+	for (unsigned k = 0; k < 2; k++) {
+		uint32_t *ring = k ? rx_ring : tx_ring;
+		for (unsigned i = 0; i < RING_N * 4; i++)
+			ring[i] = 0;
+		if (!gpi_cmd(CH_CMD, 0u << 24 | k, CH_CTX(k), 1)) {
+			gpi_dump(k ? "RX allocate timeout" : "TX allocate timeout");
+			return 0;
+		}
+		wr(CH_CTX(k), 16u << 24 | 0u << 14 | (k ? 0u : 1u) << 3 | 2u);
+		wr(CH_CTX(k) + CTX_RLEN, RING_N * 16);
+		wr(CH_CTX(k) + CTX_BASE_LO, (uint32_t)pa(ring));
+		wr(CH_CTX(k) + CTX_BASE_HI, (uint32_t)(pa(ring) >> 32));
+		wr(CH_DB(k) + 4, (uint32_t)(pa(ring) >> 32));
+		wr(CH_SCRATCH(k, 0), (uint32_t)(!k) << 16 | 3u << 4 | 1u);	/* pair, I2C, SE 1 */
+		wr(CH_SCRATCH(k, 1), 0);
+		wr(CH_SCRATCH(k, 2), 0);
+		wr(CH_SCRATCH(k, 3), 0);
+		wr(CH_QOS(k), 1);
+	}
+	for (unsigned k = 0; k < 2; k++)
+		if (!gpi_cmd(CH_CMD, 1u << 24 | k, CH_CTX(k), 2)) {
+			gpi_dump(k ? "RX start timeout" : "TX start timeout");
+			return 0;
+		}
+	tx_wp = rx_wp = 0;
+	con_hex2("GPI", "started tx=", rd(CH_CTX(0)), "rx=", rd(CH_CTX(1)));
 	return 1;
 }
 
-static uint32_t last_irq;
-
-static void se_abort(void)
+static void put_tre(uint32_t *ring, unsigned *wp, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
 {
-	wr(SE_PA + SE_CTRL, 2);
-	for (unsigned i = 0; i < 5000 && !(rd(SE_PA + SE_IRQ) & (1u << 5)); i++)
-		udelay(1);
-	wait_clear(SE_PA + SE_STATUS, 1);
-	for (unsigned i = 0; i < 64 && (rd(SE_PA + SE_RX_COUNT) & 0x1ffffff); i++)
-		(void)rd(SE_PA + SE_RX);
-	wr(SE_PA + SE_IRQ_CLR, 0xffffffffu);
+	uint32_t *t = &ring[*wp * 4];
+	t[0] = d0;
+	t[1] = d1;
+	t[2] = d2;
+	t[3] = d3;
+	*wp = (*wp + 1) % RING_N;
 }
 
-/* One I2C message: write nt (<= 3) bytes, or read nr (<= 90) bytes. */
-static int msg(const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr, int stretch)
+static void doorbell(unsigned k)
 {
-	unsigned sent = 0, got = 0;
-	if (!wait_clear(SE_PA + SE_STATUS, 1))
-		return E_IO;
-	wr(SE_PA + SE_IRQ_CLR, 0xffffffffu);
-	wr(SE_PA + SE_TX_WM, nt ? 1 : 0);
-	wr(SE_PA + (nr ? SE_RX_LEN : SE_TX_LEN), nr ? nr : nt);
-	wr(SE_PA + SE_CMD, ((nr ? 2u : 1u) << 27) | ((uint32_t)RMI_ADDR << 9) | (stretch ? 4u : 0u));
-	for (unsigned i = 0; i < 20000; i++) {
-		uint32_t irq = last_irq = rd(SE_PA + SE_IRQ);
-		if (irq & SE_ERRORS) {
-			int err = (irq & SE_NACK) ? E_NACK : E_IO;
-			for (unsigned j = 0; j < 5000 && !(irq & SE_DONE); j++) {
-				udelay(1);
-				irq = rd(SE_PA + SE_IRQ);
-			}
-			if ((irq & SE_DONE) && !(rd(SE_PA + SE_STATUS) & 1)) {
-				wr(SE_PA + SE_IRQ_CLR, irq);
-				return err;
-			}
-			se_abort();
-			return err;
+	uint32_t *ring = k ? rx_ring : tx_ring;
+	unsigned wp = k ? rx_wp : tx_wp;
+	__asm__ volatile("dsb sy" ::: "memory");
+	wr(CH_DB(k), (uint32_t)pa(&ring[wp * 4]));
+}
+
+/* Wait for a transfer-completion event of channel chid; recycle consumed events. */
+static int wait_event(unsigned chid)
+{
+	uint64_t end = ticks() + 100ull * TICKS_PER_MS;
+	while (ticks() < end) {
+		uintptr_t hw = rd(EV_CTX + CTX_RP_LO);
+		while (hw != pa(&ev_ring[ev_rp * 4])) {
+			uint32_t *e = &ev_ring[ev_rp * 4];
+			for (int i = 0; i < 4; i++)
+				last_ev[i] = e[i];
+			ev_rp = (ev_rp + 1) % EV_N;
+			ev_wp = (ev_wp + 1) % EV_N;
+			wr(EV_DB, (uint32_t)pa(&ev_ring[ev_wp * 4]));
+			wr(SRC_IEOB_CLR, 1);
+			uint32_t type = (last_ev[3] >> 16) & 0xff, ch = last_ev[3] >> 24;
+			uint32_t code = last_ev[2] >> 24;
+			if (type == 0x22 && ch == chid)
+				return (code == 1 || code == 2) ? 0 : E_IO;
+			hw = rd(EV_CTX + CTX_RP_LO);
 		}
-		if (nt && !sent && (irq & SE_TX_WM_IRQ)) {
-			uint32_t word = 0;
-			for (unsigned j = 0; j < nt; j++)
-				word |= (uint32_t)tx[j] << (8 * j);
-			wr(SE_PA + SE_TX, word);
-			sent = nt;
-			wr(SE_PA + SE_TX_WM, 0);
-		}
-		uint32_t count = rd(SE_PA + SE_RX_COUNT) & 0x1ffffff;
-		while (count-- && got < nr) {
-			uint32_t word = rd(SE_PA + SE_RX);
-			for (unsigned j = 0; j < 4 && got < nr; j++)
-				rx[got++] = (uint8_t)(word >> (8 * j));
-		}
-		if (irq & SE_DONE) {
-			wr(SE_PA + SE_IRQ_CLR, irq);
-			return (got == nr && sent == nt) ? 0 : E_IO;
-		}
-		wr(SE_PA + SE_IRQ_CLR, irq & (SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ));
-		udelay(1);
+		udelay(10);
 	}
-	se_abort();
 	return E_TIME;
+}
+
+/* CONFIG0 for 100 kHz from 19.2 MHz (Linux geni_i2c_clk_map_19p2mhz): div 7, high 10, low 12, cycle 26 */
+static void put_config(void)
+{
+	put_tre(tx_ring, &tx_wp, 12u | 10u << 8 | 26u << 16 | 1u << 24 | 1u << 25, 0, 7u,
+	    TRE_CONFIG0 << 16 | F_CHAIN);
+}
+
+static int gpi_write(const uint8_t *data, unsigned n, int stretch)
+{
+	for (unsigned i = 0; i < n; i++)
+		xbuf[i] = data[i];
+	put_config();
+	put_tre(tx_ring, &tx_wp, I2C_WR | (uint32_t)RMI_ADDR << 8 | (stretch ? 1u << 26 : 0), 0, n,
+	    TRE_GO << 16 | F_CHAIN);
+	put_tre(tx_ring, &tx_wp, (uint32_t)pa(xbuf), (uint32_t)(pa(xbuf) >> 32), n, TRE_DMA << 16 | F_IEOT);
+	doorbell(0);
+	return wait_event(0);
 }
 
 /* RMI4 register read on the current page: pointer write (held bus), then read. */
 static int rmi_read(uint8_t reg, uint8_t *buf, unsigned len)
 {
-	int err = msg(&reg, 1, 0, 0, 1);
-	return err ? err : msg(0, 0, buf, len, 0);
+	if (len > sizeof(xbuf) - 64)
+		return E_IO;
+	int err = gpi_write(&reg, 1, 1);
+	if (err)
+		return err;
+	uint8_t *rx = xbuf + 64;
+	put_tre(rx_ring, &rx_wp, (uint32_t)pa(rx), (uint32_t)(pa(rx) >> 32), len, TRE_DMA << 16 | F_IEOT);
+	doorbell(1);
+	put_tre(tx_ring, &tx_wp, I2C_RD | (uint32_t)RMI_ADDR << 8, 0, len, TRE_GO << 16 | F_LINK);
+	doorbell(0);
+	if ((err = wait_event(1)))
+		return err;
+	for (unsigned i = 0; i < len; i++)
+		buf[i] = rx[i];
+	return 0;
 }
 
 static int rmi_write1(uint8_t reg, uint8_t v)
 {
 	uint8_t b[2] = { reg, v };
-	return msg(b, 2, 0, 0, 0);
+	return gpi_write(b, 2, 0);
 }
 
 static void hexline(const char *label, const uint8_t *b, unsigned n)
@@ -278,7 +449,7 @@ static void hexline(const char *label, const uint8_t *b, unsigned n)
 void test_touch(void)
 {
 	con_str("TOUCH", "RMI4 0x20 on i2c9 (SE @ A84000)");
-	if (!clocks() || !se_init())
+	if (!clocks() || !gpi_init())
 		return;
 	con_hex2("TLMM", "rst=", rd(GPIO_CFG(PIN_RESET)), "irq=", rd(GPIO_CFG(PIN_IRQ)));
 	con_hex2(" i2c", "sda=", rd(GPIO_CFG(PIN_SDA)), "scl=", rd(GPIO_CFG(PIN_SCL)));
@@ -291,9 +462,9 @@ void test_touch(void)
 	mdelay(200);				/* syna,startup-delay-ms */
 
 	int err = rmi_write1(0xff, 0);		/* page 0 */
-	con_hex2("PAGE0", "err=", err, "irq=", last_irq);
+	con_hex2("PAGE0", "err=", err, "ev3=", last_ev[3]);
 	if (err) {
-		con_str("TOUCH", err == E_NACK ? "NACK: IC unpowered? (PM660 GPIO12)" : "bus error");
+		gpi_dump(err == E_TIME ? "page select: no completion event" : "page select failed");
 		return;
 	}
 	/*
