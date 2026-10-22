@@ -545,17 +545,17 @@ static int zap_load(void)
 	 * t15 (IMG_0068) hung after INIT_IMAGE/MEM_SETUP returned 0, with no
 	 * exception: in the copy or in AUTH_AND_RESET. t15b marks each step.
 	 */
-	con_hex2(" region", "before=", *(volatile uint32_t *)ZAP_REGION, "meta=", (uint32_t)(uintptr_t)zap_meta);
+	CPDETAIL(con_hex2(" region", "before=", *(volatile uint32_t *)ZAP_REGION, "meta=", (uint32_t)(uintptr_t)zap_meta));
 	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, (uintptr_t)zap_meta, 0, 0);	/* VAL, RW */
 	int64_t rm = scm(0x0202, 3, ZAP_PAS_ID, ZAP_REGION, 0x1000, 0);
 	con_hex2(" pas", "init=", (uint32_t)ri, "memsetup=", (uint32_t)rm);
 	if (ri || rm)
 		return 0;
-	con_hex2(" region", "read=", *(volatile uint32_t *)ZAP_REGION, "step=", 1);
+	CPDETAIL(con_hex2(" region", "read=", *(volatile uint32_t *)ZAP_REGION, "step=", 1));
 	volatile uint32_t *dst = (volatile uint32_t *)ZAP_REGION;	/* segment pa 0x5000 = region + 0 */
 	dst[0] = 0x12345678u;
 	__asm__ volatile("dsb sy" ::: "memory");
-	con_hex2(" region", "wrote1=", dst[0], "step=", 2);
+	CPDETAIL(con_hex2(" region", "wrote1=", dst[0], "step=", 2));
 	for (uint32_t i = 0; i < 0x1000 / 4; i++) {
 		uint32_t w = 0;
 		for (unsigned k = 0; k < 4; k++)
@@ -691,6 +691,7 @@ static void gx_on_and_probe(void)
 	wr(GMU_REG(GMU_BOOT_SLUMBER_OPTION), 0);
 	wr(GMU_REG(GMU_GX_VOTE_IDX), gx);
 	wr(GMU_REG(GMU_MX_VOTE_IDX), mx);
+	udelay(50000);
 	if (!gmu_oob(" oob boot", 22, 30)) {
 		con_str("GX", "no BOOT_SLUMBER ack: stop");
 		return;
@@ -707,7 +708,15 @@ static void gx_on_and_probe(void)
 	for (unsigned i = 0; i < 5 && !hfi; i++)
 		hfi = wait_bits(GMU_REG(GMU_HFI_CTRL_STATUS), 1, 1);
 	con_hex2(" hfi", "ok=", hfi, "status=", rd(GMU_REG(GMU_HFI_CTRL_STATUS)));
+	/*
+	 * t14..t15c: GPU_SET not acked, GMU2HOST bit 23 = CM3_FAULT (the GMU
+	 * crashed); t13 (slow, lots of console output between steps) got the
+	 * ack. t15d: 50 ms before the request, and the state just before it.
+	 */
+	udelay(50000);
+	con_hex2(" pre", "g2h=", rd(GMU_REG(GMU_GMU2HOST_INTR_INFO)), "ao=", rd(GMU_REG(GMU_AO_HOST_INTR_STATUS)));
 	gmu_oob(" oob gpu", 16, 24);
+	con_hex2(" log", "w0=", *(volatile uint32_t *)(gmu_mem + 0x5000), "w1=", *(volatile uint32_t *)(gmu_mem + 0x5004));
 
 	uint32_t st = rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS));
 	con_hex2("GX", "gdscr=", rd(GPUCC + GPUCC_GX_GDSCR), "sptprac=", st);
