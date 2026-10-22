@@ -295,6 +295,12 @@ AUTH); it is **our SMC/PAS invocation path specifically** (bare shim and XNU bot
 returns). Next: diff our qcom_scm call sequence against drivers/firmware/qcom/qcom_scm*.c - candidates: the
 SMCCC res/convention, metadata as a dma-coherent (uncached, <4G) buffer vs our carveout, and any SHM-bridge /
 memory-ownership state the hypervisor sets up for Linux PAS buffers that our environment lacks.
+
+**SOLVED (2026-10-22): the zap AUTH_AND_RESET hung because our SMC left x7 as a garbage clobber.** Mainline
+__scm_smc_do_quirk (qcom_scm-smc.c) always passes x7 = args[7] = 0 (and x6 = saved a6). Our scm()/scm5() set
+x5/x6 but listed x7 only in the clobber list, so a nonzero x7 reached TZ and PAS AUTH_AND_RESET never returned.
+**t26 (0c31dcf): x7 = 0 in both helpers -> `auth x0=0 intr=0` (AUTH_AND_RESET returns success, no spins).**
+The zap shader now authorizes from the bare shim. (Also added a capped INTERRUPTED counter; it was 0.)
 (pmOS test artifacts in ~/Downloads/pmos-sargo-boot, not in git.)
 
 ## Stage plan
