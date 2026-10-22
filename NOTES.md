@@ -51,6 +51,9 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   **KEY FINDING (2026-10-22): mainline Linux (pmOS, RAM-only fastboot boot) loads the zap and fully inits the
   Adreno 615 on this firmware (debugfs gpu-initialized:1, revision 615). So the zap wall is OUR SMC/PAS caller
   path, not the firmware/shader/GPU-setup. Reopen the GPU by matching qcom_scm's AUTH_AND_RESET invocation.**
+  **SOLVED (t26, 0c31dcf): the SMC left x7 as a garbage clobber; mainline passes x7=0. Zeroed x7 in
+  scm()/scm5() -> AUTH_AND_RESET returns 0 (auth x0=0 intr=0). The zap shader loads from the bare shim.
+  Next: confirm CP_SET_SECURE_MODE 0 + a render in non-secure mode, then fold x7=0 into XNU (gpu2xnu.py).**
   Plan: GLES via Mesa freedreno like
   joranv1/ios-sailfish (no license on its own code: reference only unless the author adds one).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
