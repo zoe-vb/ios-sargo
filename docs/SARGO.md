@@ -272,7 +272,10 @@ is set when the KGSL IOMMU has its secure context (gfx3d_secure, SID 2) attached
 VMID_CP_PIXEL (hypervisor-assigned secure bank), and kgsl_iommu.c issues an extra TZ call SCM_SVC_MP
 CP_SMMU_APERTURE_ID before that. Neither is done by us - prime suspects for the AUTH_AND_RESET hang. Next: read
 kgsl_iommu.c ~1160-1300 and downstream arm-smmu secure-domain attach (hyp_assign of the secure CB's page tables)
-and reproduce them before the zap load.
+and reproduce them before the zap load. **t22 (a7d5a31, IMG_0077)**: aperture call (MP 0x1b, cb 0) x0=x1=0; SID 2 ->
+CB 1 (SMR3 0x80000002) with an empty table hyp_assigned HLOS -> {HLOS RW, CP_PIXEL R} (MP 0x16, 7 args, x5 = args[3..])
+x0=x1=0; auth still hangs. **t23 (12e99d2)**: .mdt copied into the carveout and INIT_IMAGE given 0x95c15000 as
+downstream pil_boot does (mdata_phys = region_start): still hangs (owner report).
 
 ## Stage plan
 
