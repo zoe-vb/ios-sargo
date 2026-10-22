@@ -755,6 +755,30 @@ static int zap_load(void)
 	gmu_oob(" oob gpu2", 16, 24);
 	CPDETAIL(con_hex2(" gx", "sptprac=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)), "trust=", rd(GPU + 0xf400 * 4)));
 	rpmh_bcm_vote("CE0", (1u << 30) | (1u << 29) | (1u << 14) | 1u);	/* commit, valid, x=1, y=1 */
+	/*
+	 * t21: Linux makes this call with IRQs enabled and services them; the
+	 * shim runs masked with no handler, and t17+ enabled the GPU's
+	 * interrupts. Show what is pending, then quiesce every source the shim
+	 * owns (EL1 timers, RBBM/GMU interrupt masks, the GPU/GMU SPIs).
+	 */
+	uint64_t isr, cntp, cntv;
+	__asm__ volatile("mrs %0, isr_el1" : "=r"(isr));
+	__asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(cntp));
+	__asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(cntv));
+	con_hex2(" irq", "isr=", (uint32_t)isr, "cntp/v=", (uint32_t)(cntp << 16 | cntv));
+	con_hex2(" gicr0", "pend=", rd(0x17a60000UL + 0x10200), "en=", rd(0x17a60000UL + 0x10100));
+	con_hex2(" spi288", "pend=", rd(0x17a00000UL + 0x224), "en=", rd(0x17a00000UL + 0x124));
+	__asm__ volatile("msr cntp_ctl_el0, %0; msr cntv_ctl_el0, %0; isb" : : "r"((uint64_t)2));	/* off, masked */
+	gpu_w(0x0038, 0);				/* RBBM_INT_0_MASK */
+	wr(GMU_REG(0x23b06), 0xffffffffu);		/* GMU_AO_HOST_INTERRUPT_MASK */
+	wr(GMU_REG(0x23b04), 0xffffffffu);		/* .. CLR */
+	wr(GMU_REG(0x1f993), 0xffffffffu);		/* GMU2HOST_INTR_MASK */
+	wr(GMU_REG(GMU_GMU2HOST_INTR_CLR), 0xffffffffu);
+	wr(0x17a00000UL + 0x1a4, (1u << 12) | (1u << 16) | (1u << 17));	/* GICD_ICENABLER9: SPI 300, 304, 305 */
+	wr(0x17a00000UL + 0x2a4, (1u << 12) | (1u << 16) | (1u << 17));	/* GICD_ICPENDR9 */
+	udelay(100);
+	__asm__ volatile("mrs %0, isr_el1" : "=r"(isr));
+	con_hex2(" quiet", "isr=", (uint32_t)isr, "spi pend=", rd(0x17a00000UL + 0x224));
 	con_str(" pas", "AUTH_AND_RESET...");
 	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
 	con_hex2(" pas", "auth=", (uint32_t)rr, "word0=", *(volatile uint32_t *)ZAP_REGION);
