@@ -420,7 +420,13 @@ static void __attribute__((noreturn)) board_bringup(uintptr_t dtb)
 	test_gic();
 #endif
 	con_skip();
-#ifdef BRINGUP_TOUCH
+#ifdef BRINGUP_GPU
+	stage = "gpu";
+	test_gpu();
+	con_str("DONE", "GPU probe finished; reset in ~60 s");
+	delay_ms(60000);
+	reset(20);
+#elif defined(BRINGUP_TOUCH)
 	stage = "touch";
 	test_touch();
 	/* touch probe: quick reset, so its timing shows whether the CPU survived */

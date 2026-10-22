@@ -850,7 +850,7 @@ static void ts_gpio_dump(unsigned apid, const char *label)
 }
 
 /* PM660 GPIO 12 -> output high (digital, constant source, inverted) */
-static int ts_power_on(void)
+static int __attribute__((unused)) ts_power_on(void)
 {
 	uint32_t ver = rd(SPMI_CORE), owner = 7;
 	unsigned apid = spmi_apid(TS_PPID, &owner);
