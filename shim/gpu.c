@@ -851,6 +851,14 @@ static int zap_load(void)
 	CPDETAIL(con_hex2(" gx", "sptprac=", rd(GMU_REG(GMU_SPTPRAC_PWR_CLK_STATUS)), "trust=", rd(GPU + 0xf400 * 4)));
 	rpmh_bcm_vote("CE0", (1u << 30) | (1u << 29) | (1u << 14) | 1u);	/* commit, valid, x=1, y=1 */
 	/*
+	 * t24: downstream scm_pas_enable_bw votes MASTER_CRYPTO_CORE0 -> EBI;
+	 * mainline icc sdm670 path: qxm_crypto [CE0] -> qnm_aggre2_noc [SN10]
+	 * -> qns_memnoc_sf [SN0] -> qns_llcc [SH0] -> ebi [MC0, ACV]. The CPU
+	 * keeps SH0/MC0/ACV up; vote the aggre2/system NoC hops too.
+	 */
+	rpmh_bcm_vote("SN10", (1u << 30) | (1u << 29) | (1u << 14) | 1u);
+	rpmh_bcm_vote("SN0", (1u << 30) | (1u << 29) | (1u << 14) | 1u);
+	/*
 	 * t21: Linux makes this call with IRQs enabled and services them; the
 	 * shim runs masked with no handler, and t17+ enabled the GPU's
 	 * interrupts. Show what is pending, then quiesce every source the shim
@@ -860,7 +868,7 @@ static int zap_load(void)
 	__asm__ volatile("mrs %0, isr_el1" : "=r"(isr));
 	__asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(cntp));
 	__asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(cntv));
-	con_hex2(" irq", "isr=", (uint32_t)isr, "cntp/v=", (uint32_t)(cntp << 16 | cntv));
+	CPDETAIL(con_hex2(" irq", "isr=", (uint32_t)isr, "cntp/v=", (uint32_t)(cntp << 16 | cntv)));
 	CPDETAIL(con_hex2(" gicr0", "pend=", rd(0x17a60000UL + 0x10200), "en=", rd(0x17a60000UL + 0x10100)));
 	CPDETAIL(con_hex2(" spi288", "pend=", rd(0x17a00000UL + 0x224), "en=", rd(0x17a00000UL + 0x124)));
 	__asm__ volatile("msr cntp_ctl_el0, %0; msr cntv_ctl_el0, %0; isb" : : "r"((uint64_t)2));	/* off, masked */
