@@ -42,14 +42,15 @@ command -v mkbootimg >/dev/null && MKBOOTIMG=mkbootimg || MKBOOTIMG="python3 ../
 [ "${TOUCH:-}" = bb ] && BDEF="$BDEF -DTOUCH_BB"
 # GPU=1 (sargo): the diagnostic screen runs the Adreno/GMU probe (shim/gpu.c)
 [ -n "${GPU:-}" ] && BDEF="$BDEF -DBRINGUP_GPU"
-# GPU=gmu: also boot the GMU (GPU=gx: then GX power through it; GPU=cp: then SQE + ring test); embeds research/sargo-gpu-fw/a630_gmu.bin (not in git)
+# GPU=gmu: also boot the GMU (GPU=gx: then GX power through it; GPU=cp: then SQE + ring test; GPU=zap: then the zap shader); embeds research/sargo-gpu-fw/a630_gmu.bin (not in git)
 GMUFW=
-if [ "${GPU:-}" = gmu ] || [ "${GPU:-}" = gx ] || [ "${GPU:-}" = cp ]; then
+if [ "${GPU:-}" = gmu ] || [ "${GPU:-}" = gx ] || [ "${GPU:-}" = cp ] || [ "${GPU:-}" = zap ]; then
 	GMUFW=$(cd .. && pwd)/research/sargo-gpu-fw/a630_gmu.bin
 	[ -f "$GMUFW" ] || { echo "error: $GMUFW missing (docs/SARGO.md, GPU bring-up)" >&2; exit 1; }
 	BDEF="$BDEF -DGPU_GMU_BOOT"
 	[ "$GPU" = gx ] && BDEF="$BDEF -DGPU_GX_ON"
 	[ "$GPU" = cp ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP"
+	[ "$GPU" = zap ] && BDEF="$BDEF -DGPU_GX_ON -DGPU_CP -DGPU_ZAP"
 fi
 CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra $BDEF"
 # sweet keeps the historical out/ (NOTES.md refers to it)
@@ -63,6 +64,9 @@ done
 if [ -n "$GMUFW" ]; then
 	printf '\t.section .rodata\n\t.balign 16\n\t.globl gmu_fw, gmu_fw_end\ngmu_fw:\n\t.incbin "%s"\ngmu_fw_end:\n' "$GMUFW" > $OUT/gmufw.S
 	printf '\t.balign 16\n\t.globl sqe_fw, sqe_fw_end\nsqe_fw:\n\t.incbin "%s"\nsqe_fw_end:\n' "${GMUFW%/*}/a630_sqe.fw" >> $OUT/gmufw.S
+	for z in mdt b02; do
+		printf '\t.balign 16\n\t.globl zap_%s, zap_%s_end\nzap_%s:\n\t.incbin "%s"\nzap_%s_end:\n' $z $z $z "${GMUFW%/*}/a615_zap.$z" $z >> $OUT/gmufw.S
+	done
 	$CC $CFLAGS -c $OUT/gmufw.S -o $OUT/gmufw.o
 	OBJS+=($OUT/gmufw.o)
 fi

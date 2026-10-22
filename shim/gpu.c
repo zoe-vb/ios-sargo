@@ -36,6 +36,14 @@
  * CP_ME_INIT, then CP_MEM_WRITE of 0xc0ffee15 to GPU memory. The GPU stays
  * in secure mode (no zap shader yet, RBBM_SECVID_TRUST_CNTL untouched).
  *
+ * t15 (GPU=zap, also -DGPU_ZAP): after the ring test, the zap shader as Linux
+ * qcom_mdt_load + a6xx_zap_shader_init: TZ PAS (SIP SMC64, svc 2) for PAS id
+ * 13 (stock DT /soc/qcom,kgsl-hyp): IS_SUPPORTED, INIT_IMAGE with the .mdt
+ * (ELF header + hash segment = the metadata), MEM_SETUP of the reserved
+ * gpu_region 0x95c15000 (8 KiB; one relocatable segment, pa 0x5000, 0x7b0
+ * bytes from .b02), copy, AUTH_AND_RESET; then CP_SET_SECURE_MODE 0 and a
+ * second CP_MEM_WRITE, with RBBM_SECVID_TRUST_CNTL read before and after.
+ *
  * Register offsets: Linux gcc-sdm845.c (also SDM670), gpucc-sdm845.c and
  * registers/adreno/a6xx_gmu.xml (dword offsets from the GPU base).
  *
@@ -126,6 +134,11 @@
 #else
 #define DETAIL(stmt)	do { stmt; } while (0)
 #endif
+#ifdef GPU_ZAP		/* and t14's ring-test details for t15 */
+#define CPDETAIL(stmt)	do { if (0) { stmt; } } while (0)
+#else
+#define CPDETAIL(stmt)	do { stmt; } while (0)
+#endif
 
 static inline uint32_t rd(uintptr_t a) { return *(volatile uint32_t *)a; }
 static inline void wr(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; __asm__ volatile("dsb sy" ::: "memory"); }
@@ -211,6 +224,12 @@ static uint8_t gpu_mem[0x10000] __attribute__((aligned(4096)));
 #define GPU_IOVA	(GMU_IOVA + 0x100000)	/* same L3 table, entries 256.. */
 #define GPU_RING	0x8000			/* offsets in gpu_mem */
 #define GPU_TARGET	0x9000
+#endif
+#ifdef GPU_ZAP
+extern const uint8_t zap_mdt[], zap_mdt_end[], zap_b02[], zap_b02_end[];	/* gmufw.S */
+static uint8_t zap_meta[0x2000] __attribute__((aligned(4096)));
+#define ZAP_REGION	0x95c15000UL	/* reserved-memory gpu_region, 8 KiB */
+#define ZAP_PAS_ID	13
 #endif
 
 static int gmu_clock_200(void)
@@ -462,11 +481,65 @@ static uint32_t pkt7(unsigned op, unsigned cnt)
 	return 0x70000000u | cnt | pm4_parity(cnt) << 15 | (op & 0x7fu) << 16 | pm4_parity(op) << 23;
 }
 
+#ifdef GPU_ZAP
+/* qcom_scm SMCCC convention: SIP, SMC64, standard call; x0 status, x1 result */
+static int64_t scm(uint32_t svc_cmd, uint32_t arginfo, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t *res)
+{
+	register uint64_t x0 __asm__("x0") = 0x42000000u | svc_cmd;
+	register uint64_t x1 __asm__("x1") = arginfo;
+	register uint64_t x2 __asm__("x2") = a0;
+	register uint64_t x3 __asm__("x3") = a1;
+	register uint64_t x4 __asm__("x4") = a2;
+	register uint64_t x5 __asm__("x5") = 0;
+	register uint64_t x6 __asm__("x6") = 0;
+	for (unsigned tries = 0; tries < 20; tries++) {
+		x0 = 0x42000000u | svc_cmd; x1 = arginfo; x2 = a0; x3 = a1; x4 = a2; x5 = 0; x6 = 0;
+		__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
+		    : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+		if ((int64_t)x0 != -12)		/* QCOM_SCM_V2_EBUSY */
+			break;
+		udelay(30000);
+	}
+	if (res)
+		*res = x1;
+	return (int64_t)x0;
+}
+
+/* Linux qcom_mdt_load + qcom_scm_pas_auth_and_reset for the a615 zap shader */
+static int zap_load(void)
+{
+	uint32_t mdt_size = (uint32_t)(zap_mdt_end - zap_mdt), b02_size = (uint32_t)(zap_b02_end - zap_b02);
+	uint64_t avail = 0, sup = 0;
+	int64_t ra = scm(0x0601, 1, 0x42000201u, 0, 0, &avail);	/* INFO IS_CALL_AVAIL(PAS_INIT_IMAGE) */
+	int64_t rs = scm(0x0207, 1, ZAP_PAS_ID, 0, 0, &sup);		/* PAS_IS_SUPPORTED */
+	con_hex2("ZAP", "avail=", (uint32_t)(ra << 16 | (avail & 0xffff)), "supported=", (uint32_t)(rs << 16 | (sup & 0xffff)));
+	if (mdt_size > sizeof(zap_meta) || b02_size > 0x2000 || mdt_size < 0x94) {
+		con_hex2("ZAP", "bad files mdt=", mdt_size, "b02=", b02_size);
+		return 0;
+	}
+	for (uint32_t i = 0; i < mdt_size; i++)
+		zap_meta[i] = zap_mdt[i];
+	__asm__ volatile("dsb sy" ::: "memory");
+	int64_t ri = scm(0x0201, 2 | (2u << 6), ZAP_PAS_ID, (uintptr_t)zap_meta, 0, 0);	/* VAL, RW */
+	int64_t rm = scm(0x0202, 3, ZAP_PAS_ID, ZAP_REGION, 0x1000, 0);
+	con_hex2(" pas", "init=", (uint32_t)ri, "memsetup=", (uint32_t)rm);
+	if (ri || rm)
+		return 0;
+	volatile uint8_t *dst = (volatile uint8_t *)ZAP_REGION;		/* segment pa 0x5000 = region + 0 */
+	for (uint32_t i = 0; i < 0x1000; i++)
+		dst[i] = i < b02_size ? zap_b02[i] : 0;
+	__asm__ volatile("dsb sy" ::: "memory");
+	int64_t rr = scm(0x0205, 1, ZAP_PAS_ID, 0, 0, 0);		/* AUTH_AND_RESET */
+	con_hex2(" pas", "auth=", (uint32_t)rr, "word0=", *(volatile uint32_t *)ZAP_REGION);
+	return rr == 0;
+}
+#endif
+
 /* the CP part of Linux a6xx hw_init + a6xx_cp_init + a ring write test */
 static void cp_test(void)
 {
 	uint32_t sqe_size = (uint32_t)(sqe_fw_end - sqe_fw);
-	con_hex2("SQE", "size=", sqe_size, "word1=", ((const uint32_t *)sqe_fw)[1]);
+	CPDETAIL(con_hex2("SQE", "size=", sqe_size, "word1=", ((const uint32_t *)sqe_fw)[1]));
 	if (sqe_size < 8 || sqe_size - 4 > GPU_RING || (sqe_size & 3)) {
 		con_str("SQE", "bad firmware size: stop");
 		return;
@@ -532,12 +605,38 @@ static void cp_test(void)
 		udelay(1000);
 	}
 	con_hex2("CP", "rptr=", rptr, "wptr=", n);
-	con_hex2(" ring", "init-end=", after_init, "ms=", ms);
+	CPDETAIL(con_hex2(" ring", "init-end=", after_init, "ms=", ms));
 	con_hex2(" target", "value=", got, "rbbm=", gpu_r(RBBM_STATUS));
-	con_hex2(" fault", "cphw=", gpu_r(0x0821), "int0=", gpu_r(RBBM_INT_0_STATUS));
-	con_hex2(" cp", "status1=", gpu_r(0x0825), "trust=", gpu_r(0xf400));
-	con_hex2(" cb1", "fsr=", rd(GSMMU_CB(GMU_CB) + 0x58), "far=", rd(GSMMU_CB(GMU_CB) + 0x60));
+	CPDETAIL(con_hex2(" fault", "cphw=", gpu_r(0x0821), "int0=", gpu_r(RBBM_INT_0_STATUS)));
+	CPDETAIL(con_hex2(" cp", "status1=", gpu_r(0x0825), "trust=", gpu_r(0xf400)));
+	CPDETAIL(con_hex2(" cb1", "fsr=", rd(GSMMU_CB(GMU_CB) + 0x58), "far=", rd(GSMMU_CB(GMU_CB) + 0x60)));
 	con_str("CP", got == 0xc0ffee15u ? "RING TEST PASSED: GPU WROTE MEMORY" : "ring test failed");
+#ifdef GPU_ZAP
+	if (got != 0xc0ffee15u || !zap_load())
+		return;
+	unsigned start = n;
+	ring[n++] = pkt7(0x66, 1);			/* CP_SET_SECURE_MODE */
+	ring[n++] = 0;
+	ring[n++] = pkt7(0x3d, 3);			/* CP_MEM_WRITE */
+	ring[n++] = GPU_IOVA + GPU_TARGET + 4;
+	ring[n++] = 0;
+	ring[n++] = 0x5ec0ff15u;
+	mem[GPU_TARGET / 4 + 1] = 0xdeadbeefu;
+	__asm__ volatile("dsb sy" ::: "memory");
+	gpu_w(0x0807, n);
+	for (ms = 0; ms < 200; ms++) {
+		rptr = gpu_r(0x0806);
+		got = mem[GPU_TARGET / 4 + 1];
+		if (rptr == n && got == 0x5ec0ff15u)
+			break;
+		udelay(1000);
+	}
+	con_hex2("CP2", "rptr=", rptr, "wptr=", n);
+	con_hex2(" from", "start=", start, "ms=", ms);
+	con_hex2(" target", "value=", got, "cphw=", gpu_r(0x0821));
+	con_hex2(" trust", "now=", gpu_r(0xf400), "int0=", gpu_r(RBBM_INT_0_STATUS));
+	con_str("ZAP", gpu_r(0xf400) == 0 && got == 0x5ec0ff15u ? "SECURE MODE OFF, GPU STILL RUNS" : "secure mode not left");
+#endif
 }
 #endif
 
