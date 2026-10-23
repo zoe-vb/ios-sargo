@@ -10,20 +10,12 @@ R=$H/../..
 M=$R/research/mesa
 B=$R/research/mesa-ios
 export PATH=$R/research/tools/venv/bin:$R/research/tools/bin:$PATH
-LIBS="src/mesa/libmesa.a src/gallium/auxiliary/libgallium.a
-	src/gallium/drivers/freedreno/libfreedreno.a src/gallium/winsys/freedreno/drm/libfreedrenowinsys.a
-	src/freedreno/drm/libfreedreno_drm.a src/freedreno/ir3/libfreedreno_ir3.a
-	src/freedreno/ir2/libfreedreno_ir2.a src/freedreno/fdl/libfreedreno_layout.a
-	src/freedreno/common/libfreedreno_common.a src/freedreno/isa/libir3encode.a
-	src/freedreno/isa/libir3decode.a src/compiler/isaspec/libisaspec.a
-	src/freedreno/perfcntrs/libfreedreno_perfcntrs.a
-	src/compiler/glsl/libglsl.a src/compiler/glsl/glcpp/libglcpp.a src/compiler/nir/libnir.a
-	src/compiler/spirv/libvtn.a src/compiler/libcompiler.a
-	src/mesa/glapi/glapi/libglapi_bridge.a src/mesa/glapi/shared-glapi/libglapi.a
-	src/util/libxmlconfig.a src/util/libmesa_util.a src/util/libmesa_util_simd.a src/util/blake3/libblake3.a
-	src/c11/impl/libmesa_util_c11.a"
+# All static libs Mesa can build (layout drifts between versions): build them
+# all and let ld's -dead_strip drop whatever sweetgl.dylib does not reference.
+LIBS=$(cd "$B" && ninja -t targets all 2>/dev/null | grep -oE '[^ :]+\.a' | sort -u)
 (cd "$B" && ninja $LIBS)
-nm -g "$B/src/mesa/glapi/glapi/libglapi_bridge.a" > "$H/out/bridge.nm"
+BRIDGE=$(cd "$B" && echo $LIBS | tr ' ' '\n' | grep 'glapi_bridge\.a' | head -1)
+nm -g "$B/$BRIDGE" > "$H/out/bridge.nm"
 CC="xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0"
 INC="-I$H/include -I$M/include -I$M/src -I$M/src/mesa -I$M/src/mapi -I$M/src/gallium/include
 	-I$M/src/gallium/auxiliary -I$M/src/gallium/drivers -I$M/src/gallium/winsys
