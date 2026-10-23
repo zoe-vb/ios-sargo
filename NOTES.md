@@ -147,8 +147,27 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   TLB invalidate (TLBIALLNSNH); 0100 window under 2 GiB. 0096 added self-test diagnostics, 0097 halts after
   it (sargogputest=1). Reusable: the kernel GPU stack (0092 service+user client, 0093 engine, 0095-0100
   fixes) and tools/sweetgpu-test. Window is 1 GiB at 0x0 (grow within the 2 GiB input limit later; the TCR
-  readout on x33 shows the actual input size). Next: prove the IOKit user-client ABI from user space
-  (ramdisk-init sweetgpu-test, no rootfs reflash), IOSurface import (sel 12), then Mesa freedreno (milestone 2).
+  readout on x33 shows the actual input size).
+  **RAMDISK USER-CLIENT TEST PARKED (2026-10-23).** Built a static PID-1 ramdisk tool (tools/sweetgpu-test
+  + mkinit.py mini-linker for C) that talks to IOKit with raw Mach traps. It kept kernel-panicking:
+  iOS 16 forbids the legacy mach_msg_trap for PLATFORM binaries (our rootfs binary is one; namespace 23 =
+  GUARD, "Initproc failed to start"); the allow_legacy_mach_msg boot-arg is bypassed for platform binaries.
+  Switched to mach_msg2_trap (ABI from xnu-src) - still panics (further iOS-16 Mach hardening on bare
+  static binaries). PARKED: the real Mesa/libdrm shim runs in the full userland via libSystem's mach_msg2,
+  which handles all this; a bare static binary is the wrong harness. The mkinit mini-linker (static C PID 1)
+  is proven and reusable. **PIVOTED to the transplant (milestone 2).**
+  **TRANSPLANT STARTED (2026-10-23): tools/sweetgl/** = ios-sailfish's userland GPU stack, copied with the
+  author's permission (sweet_drm.c libdrm/msm shim, eagl.c EAGL shim, sweetgl.c, Mesa build recipe). ABI
+  MATCHES our user client exactly (selectors 10-16, IOServiceMatching("SweetGPU")). a6xx adaptation:
+  sweet_drm.c get_param MSM_PARAM_GPU_ID 530->615 so Mesa's freedreno picks a6xx (one Mesa build does
+  a5xx+a6xx, chosen at runtime from chip_id). **Kernel made Mesa-ready - patch 0101** (pushed, CI): submit
+  struct now the Mesa format {u32 nr_ibs, u32 nr_bos, IBs, bo-handle residency list}; cpu-fini (sel 16)
+  implemented; IOSurface import (sel 12) still stubbed until presentation. mesa-setup.sh now generates the
+  meson cross file from the system Xcode (was pinned to Xcode 15 / iOS 17.5 SDK). **Next (the long pole):
+  the Mesa cross-build** - clone Mesa at research/mesa matching mesa.patch, install meson, run
+  mesa-setup.sh + build.sh -> sweetgl.dylib; then deploy into the iOS rootfs backboardd (DYLD_INSERT +
+  CA_* env) and boot rd=sdhcroot0. Large build with Xcode-26 compat unknowns + rootfs deployment; best as
+  its own focused session. sweetgl build artifacts (out/, research/mesa*) are gitignored.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in

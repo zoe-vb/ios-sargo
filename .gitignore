@@ -14,3 +14,6 @@ xnu-kernel-*/
 xnu-src/
 .DS_Store
 tools/sweetgpu-test/out/
+tools/sweetgl/out/
+research/mesa
+research/mesa-ios
