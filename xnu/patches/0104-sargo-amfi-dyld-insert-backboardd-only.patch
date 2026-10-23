@@ -1,0 +1,28 @@
+--- a/bsd/kern/sweet_amfi.c	2026-10-23 19:10:43
++++ b/bsd/kern/sweet_amfi.c	2026-10-23 19:10:51
+@@ -316,13 +316,24 @@
+ #define SWEET_AMFI_DYLD_FLAGS	0x7bull
+ 
+ static int
+-sweet_amfi_syscall(__unused struct proc *p, int call, user_addr_t arg)
++sweet_amfi_syscall(struct proc *p, int call, user_addr_t arg)
+ {
+ 	uint64_t a[2], flags = SWEET_AMFI_DYLD_FLAGS;
++	char name[32];
+ 
+ 	if (call != 0x5a) {
+ 		return ENOPOLICY;
+ 	}
++	/*
++	 * Only backboardd gets DYLD_* honoured (so sweetgl.dylib can be
++	 * inserted). Answering 0x5a for every process un-restricts all of
++	 * dyld and wedged early boot (x37 hung before backboardd); returning
++	 * ENOPOLICY otherwise is exactly the pre-0103 behaviour that booted.
++	 */
++	proc_name(proc_pid(p), name, sizeof(name));
++	if (strcmp(name, "backboardd") != 0) {
++		return ENOPOLICY;
++	}
+ 	if (copyin(arg, a, sizeof(a)) != 0 || a[1] == 0) {
+ 		return EFAULT;
+ 	}
