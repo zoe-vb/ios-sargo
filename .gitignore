@@ -13,3 +13,4 @@ xnu-kernel/
 xnu-kernel-*/
 xnu-src/
 .DS_Store
+tools/sweetgpu-test/out/

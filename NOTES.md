@@ -99,6 +99,13 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   Next: build 0093 CI kernel -> x27, write a tiny userland tool (open SweetGPU, bo_new a cmd buf + a
   target bo, IB = CP_MEM_WRITE a sentinel to the target, submit, wait, read it back) to prove the path,
   then patch 0094 = IOSurface import + Mesa freedreno (milestone 2).
+  **TEST TOOL WRITTEN (2026-10-23): tools/sweetgpu-test/** (sweetgpu-test.c + build.sh + README). Builds
+  iOS arm64 with the system Xcode (`tools/sweetgpu-test/build.sh` -> out/sweetgpu-test, ad-hoc signed;
+  out/ gitignored). Does exactly the submit/fence proof above (CP_MEM_WRITE sentinel, selectors 10/13/14/15)
+  plus a foreign-IB rejection. No on-device shell, so it must be baked into the iOS root
+  (usr/local/bin/sweetgpu-test, a RunAtLoad LaunchDaemon) and run with `sweetnull=sweetgpu-test` to tee
+  its stdout to the console (see the README). Not yet staged into a root or run. Open question it answers:
+  does CACHE_FLUSH_TS actually write the fence on sargo (if target[0] stays 0xdeadbeef, it did not).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
