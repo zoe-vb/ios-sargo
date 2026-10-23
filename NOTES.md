@@ -106,6 +106,14 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   (usr/local/bin/sweetgpu-test, a RunAtLoad LaunchDaemon) and run with `sweetnull=sweetgpu-test` to tee
   its stdout to the console (see the README). Not yet staged into a root or run. Open question it answers:
   does CACHE_FLUSH_TS actually write the fence on sargo (if target[0] stays 0xdeadbeef, it did not).
+  **KERNEL SELF-TEST - patch 0094 (fastest on-device answer, no root reflash):** sweet_gpu.c gains
+  sweet_gpu_selftest(), run from sweet_gpu_engine_online() when boot-arg sargogputest=1. It maps a command
+  buffer + a target buffer, builds one CP_MEM_WRITE (sentinel 0x5eed600d to the target iova), submits,
+  waits 2 s on the fence and prints `SWEET GPU: selftest: submit N seq M, wait K, target 0x... -> SUBMIT/
+  FENCE OK|FAILED` to the console. This is the whole 0093 submit/fence path minus IOKit, so it proves (or
+  refutes) the CACHE_FLUSH_TS fence the moment x27 boots. Build 0094 CI kernel -> x27 = x25 cmdline +
+  sargogputest=1, boot, read the selftest line. If OK, 0093 is proven and the userland tool is just the
+  IOKit-ABI confirmation; next is IOSurface import + Mesa freedreno (milestone 2).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in

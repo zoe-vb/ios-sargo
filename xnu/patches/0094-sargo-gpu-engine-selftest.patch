@@ -1,0 +1,96 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 47e7511..c16134f 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -30,6 +30,7 @@
+ #include <arm/caches_internal.h>
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
+ #include "sweet_gpu.h"
+ 
+ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+@@ -439,6 +440,72 @@ sweet_gpu_get_info(struct sweet_gpu_info *info)
+ 	info->fence_pa = 0;			/* fence is a GPU IOVA, not exposed to clients */
+ }
+ 
++/*
++ * On-device self-test (boot-arg sargogputest=1): map a command buffer and a
++ * target buffer, build one CP_MEM_WRITE that makes the GPU write a sentinel
++ * into the target, submit it, wait on the fence and check it landed. Runs in
++ * the bring-up thread right after the engine comes online, so a plain
++ * sargogpu=1 + sargogputest=1 boot prints the answer to the console - no
++ * user-space tool or iOS-root reflash needed. The whole submit/fence path is
++ * exactly what the SweetGPU user client drives, minus the IOKit wrapping.
++ */
++#define SELFTEST_SENTINEL	0x5eed600du
++
++static uint64_t
++selftest_page(uint64_t *pa, void **va)
++{
++	vm_offset_t dma = 0;
++	if (kmem_alloc_contig(kernel_map, &dma, PAGE_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		return 0;
++	}
++	uint64_t p = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)dma));
++	*pa = p;
++	*va = (void *)dma;
++	return p;
++}
++
++static void
++sweet_gpu_selftest(void)
++{
++	uint64_t cmd_pa = 0, tgt_pa = 0;
++	void *cmd_va = NULL, *tgt_va = NULL;
++	if (!selftest_page(&cmd_pa, &cmd_va) || !selftest_page(&tgt_pa, &tgt_va)) {
++		printf("SWEET GPU: selftest: no memory\n");
++		return;
++	}
++	uint64_t cmd_iova = sweet_gpu_vm_map(&cmd_pa, 1, false);
++	uint64_t tgt_iova = sweet_gpu_vm_map(&tgt_pa, 1, false);
++	if (cmd_iova == 0 || tgt_iova == 0) {
++		printf("SWEET GPU: selftest: vm_map failed (cmd %#llx, tgt %#llx)\n", cmd_iova, tgt_iova);
++		return;
++	}
++	volatile uint32_t *tgt = (volatile uint32_t *)tgt_va;
++	tgt[0] = 0xdeadbeefu;
++	flush_dcache64((addr64_t)tgt_pa, PAGE_SIZE, TRUE);
++
++	uint32_t *ib = (uint32_t *)cmd_va;
++	unsigned k = 0;
++	ib[k++] = pkt7(0x3du, 3);		/* CP_MEM_WRITE */
++	ib[k++] = (uint32_t)tgt_iova;
++	ib[k++] = (uint32_t)(tgt_iova >> 32);
++	ib[k++] = SELFTEST_SENTINEL;
++	flush_dcache64((addr64_t)cmd_pa, PAGE_SIZE, TRUE);	/* GPU reads the IB from RAM */
++
++	struct sweet_gpu_ib sib = { .iova = cmd_iova, .dwords = k };
++	uint32_t seqno = 0;
++	int se = sweet_gpu_submit(&sib, 1, &seqno);
++	int we = se == 0 ? sweet_gpu_wait(seqno, 2000) : se;
++	flush_dcache64((addr64_t)tgt_pa, PAGE_SIZE, TRUE);	/* see the GPU's write */
++	uint32_t got = tgt[0];
++	printf("SWEET GPU: selftest: submit %d seq %u, wait %d, target %#x (want %#x) -> %s\n",
++	    se, seqno, we, got, SELFTEST_SENTINEL,
++	    se == 0 && we == 0 && got == SELFTEST_SENTINEL ? "SUBMIT/FENCE OK" : "SUBMIT/FENCE FAILED");
++
++	sweet_gpu_vm_unmap(cmd_iova);
++	sweet_gpu_vm_unmap(tgt_iova);
++}
++
+ void
+ sweet_gpu_engine_online(const struct sweet_gpu_boot *boot)
+ {
+@@ -455,5 +522,10 @@ sweet_gpu_engine_online(const struct sweet_gpu_boot *boot)
+ 	g_ready = true;
+ 	printf("SWEET GPU: engine online, chip %#x, GMEM %#x @ %#llx, ring wptr %u, VA 0x80000000+1G\n",
+ 	    g_boot.chip_id, g_boot.gmem_size, g_boot.gmem_base, rb_n);
++
++	int test = 0;
++	if (PE_parse_boot_argn("sargogputest", &test, sizeof(test)) && test) {
++		sweet_gpu_selftest();
++	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
