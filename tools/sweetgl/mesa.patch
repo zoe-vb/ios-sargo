@@ -1,5 +1,5 @@
 diff --git a/src/freedreno/drm/freedreno_bo.c b/src/freedreno/drm/freedreno_bo.c
-index 6eda810..ab48aa0 100644
+index 1f99f36..31a1a94 100644
 --- a/src/freedreno/drm/freedreno_bo.c
 +++ b/src/freedreno/drm/freedreno_bo.c
 @@ -12,6 +12,13 @@
@@ -16,8 +16,22 @@ index 6eda810..ab48aa0 100644
  simple_mtx_t table_lock = SIMPLE_MTX_INITIALIZER;
  simple_mtx_t fence_lock = SIMPLE_MTX_INITIALIZER;
  
+diff --git a/src/freedreno/drm/meson.build b/src/freedreno/drm/meson.build
+index ffaf6c9..42ba728 100644
+--- a/src/freedreno/drm/meson.build
++++ b/src/freedreno/drm/meson.build
+@@ -72,8 +72,7 @@ libfreedreno_drm = static_library(
+   c_args : [no_override_init_args, libfreedreno_drm_flags],
+   gnu_symbol_visibility : 'hidden',
+   dependencies : libfreedreno_drm_deps,
+-  # TODO
+-  link_with : [libvdrm],
++  link_with : freedreno_kmds.contains('virtio') ? [libvdrm] : [],
+   build_by_default : false,
+ )
+ 
 diff --git a/src/freedreno/meson.build b/src/freedreno/meson.build
-index e8f01b8..a6c37f9 100644
+index 29e1bc4..29e780d 100644
 --- a/src/freedreno/meson.build
 +++ b/src/freedreno/meson.build
 @@ -22,7 +22,7 @@ subdir('ir2')
@@ -30,10 +44,10 @@ index e8f01b8..a6c37f9 100644
  endif
  
 diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
-index 29134ba..0c3fdbb 100644
+index 4a1dc73..e1a5d7c 100644
 --- a/src/gallium/drivers/freedreno/freedreno_resource.c
 +++ b/src/gallium/drivers/freedreno/freedreno_resource.c
-@@ -1745,6 +1745,12 @@ fd_layout_resource_for_handle(struct fd_resource *rsc, struct winsys_handle *han
+@@ -1552,6 +1552,12 @@ fd_resource_from_handle(struct pipe_screen *pscreen,
     else
        rsc->layout.pitchalign = MAX2(rsc->layout.pitchalign, 5);
  
@@ -45,4 +59,4 @@ index 29134ba..0c3fdbb 100644
 +
     if (rsc->layout.pitch0 < (prsc->width0 * rsc->layout.cpp) ||
         fd_resource_pitch(rsc, 0) != rsc->layout.pitch0)
-       return false;
+       goto fail;

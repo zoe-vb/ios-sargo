@@ -26,7 +26,7 @@ reports `MSM_PARAM_GPU_ID = 615` so Mesa's freedreno selects the a6xx path
 
 ## Build (not yet run on this machine)
 
-Prerequisites still to set up here: a Mesa checkout at `research/mesa` matching
+Prerequisites still to set up here: a Mesa checkout at `research/mesa` (tag **mesa-24.3.4**) matching
 `mesa.patch`, `meson` (e.g. in a venv), `ninja` (have: MacPorts). Then:
 
 ```

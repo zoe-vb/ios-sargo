@@ -6,6 +6,7 @@
 set -e
 R=$(cd "$(dirname "$0")/../.." && pwd)
 H=$R/tools/sweetgl
+export PATH=$R/research/tools/venv/bin:$PATH	# Python with mako/pyyaml for Mesa's generators
 SDK=$(xcrun -sdk iphoneos --show-sdk-path)
 CLANG=$(xcrun -sdk iphoneos -f clang); CLANGXX=$(xcrun -sdk iphoneos -f clang++)
 AR=$(xcrun -sdk iphoneos -f ar); STRIP=$(xcrun -sdk iphoneos -f strip)
@@ -38,4 +39,4 @@ meson setup ../mesa-ios --cross-file "$H/ios-cross.txt" \
 	-Dvalgrind=disabled -Dlibunwind=disabled -Dlmsensors=disabled \
 	-Dbuild-tests=false -Dshader-cache=disabled -Dperfetto=false \
 	-Dgallium-va=disabled -Dgallium-rusticl=false -Dtools= \
-	-Dhtml-docs=disabled -Ddisplay-info=disabled -Dteflon=false "$@"
+	-Dhtml-docs=disabled "$@"

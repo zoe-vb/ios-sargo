@@ -9,7 +9,6 @@ H=$(cd "$(dirname "$0")" && pwd)
 R=$H/../..
 M=$R/research/mesa
 B=$R/research/mesa-ios
-export DEVELOPER_DIR=$R/research/xcode15/Xcode.app/Contents/Developer
 export PATH=$R/research/tools/venv/bin:$R/research/tools/bin:$PATH
 LIBS="src/mesa/libmesa.a src/gallium/auxiliary/libgallium.a
 	src/gallium/drivers/freedreno/libfreedreno.a src/gallium/winsys/freedreno/drm/libfreedrenowinsys.a
@@ -52,5 +51,5 @@ codesign -f -s - "$O/sweetgl.dylib"
 SIZE=$(stat -f %z "$O/sweetgl.dylib")
 [ "$SIZE" -le 67108864 ] || { echo "sweetgl.dylib is $SIZE bytes, over 64 MiB"; exit 1; }
 cp "$O/sweetgl.dylib" "$O/sweetgl-unpadded.dylib"
-truncate -s 67108864 "$O/sweetgl.dylib"
+dd if=/dev/zero of="$O/sweetgl.dylib" bs=1 count=0 seek=67108864 2>/dev/null
 echo "built $O/sweetgl.dylib ($SIZE bytes, padded to 64 MiB)"
