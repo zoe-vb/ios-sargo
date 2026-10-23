@@ -114,6 +114,14 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   refutes) the CACHE_FLUSH_TS fence the moment x27 boots. Build 0094 CI kernel -> x27 = x25 cmdline +
   sargogputest=1, boot, read the selftest line. If OK, 0093 is proven and the userland tool is just the
   IOKit-ABI confirmation; next is IOSurface import + Mesa freedreno (milestone 2).
+  **x27 (0094) PANICKED in vm_init (2026-10-23, IMG_0085): Kernel data abort in flush_dcache64 ->
+  FlushPoC_DcacheRegion** (pc 0x...481f74, lr 0x...481394, symbolized vs xnu-kernel-0094). Cause: the
+  0093 page-table flushes passed PHYSICAL addresses with phys=FALSE, so flush_dcache64 treated a physical
+  address as a VA and aborted. Convention (generated driver + ios-sailfish): phys=FALSE wants a kernel VA,
+  phys=TRUE wants a physical address. **Fixed in patch 0095** (`...`): vm_init/vm_tables/vm_ptes now flush
+  the cacheable L2/L3 tables by their kernel pointer (g_l2, g_l3[c], &g_l2[c]) with FALSE; the self-test's
+  buffer flushes already used physical+TRUE (correct). This panic was before the "engine online" line, so
+  the submit/fence path never ran yet - 0095 CI kernel -> x28 (same sargogpu=1 sargogputest=1) retries it.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in

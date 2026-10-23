@@ -1,0 +1,35 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index c16134f..bcc9532 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -157,7 +157,7 @@ vm_init(void)
+ 		return false;
+ 	}
+ 	bzero(g_l2, 4096);
+-	flush_dcache64((addr64_t)g_l2_pa, 4096, FALSE);
++	flush_dcache64((addr64_t)g_l2, 4096, FALSE);	/* clean the table to PoC for the SMMU walker */
+ 	g_boot.l1[GVA_L1] = g_l2_pa | 3u;		/* L1[2] -> L2 (table) */
+ 	__asm__ volatile("dsb sy" ::: "memory");	/* l1 is write-combining */
+ 	smmu_tlb_flush();
+@@ -196,9 +196,9 @@ vm_tables(uint32_t first, uint32_t n)
+ 			return false;
+ 		}
+ 		bzero(g_l3[c], 4096);
+-		flush_dcache64((addr64_t)l3pa, 4096, FALSE);
++		flush_dcache64((addr64_t)g_l3[c], 4096, FALSE);
+ 		g_l2[c] = l3pa | 3u;
+-		flush_dcache64((addr64_t)(g_l2_pa + c * 8), 8, FALSE);
++		flush_dcache64((addr64_t)&g_l2[c], 8, FALSE);
+ 	}
+ 	return true;
+ }
+@@ -215,8 +215,7 @@ vm_ptes(uint32_t first, uint32_t n, const uint64_t *pa, bool readonly)
+ 		g_l3[c][i % 512] = pa ? (pa[i / sub - first] + (i % sub) * 4096) | 3u | attrs : 0;
+ 	}
+ 	for (uint64_t c = i0 / 512; c <= (i1 - 1) / 512; c++) {
+-		uint64_t l3pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)g_l3[c]));
+-		flush_dcache64((addr64_t)l3pa, 4096, FALSE);
++		flush_dcache64((addr64_t)g_l3[c], 4096, FALSE);
+ 	}
+ }
+ 
