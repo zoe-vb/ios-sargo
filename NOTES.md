@@ -122,6 +122,19 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   the cacheable L2/L3 tables by their kernel pointer (g_l2, g_l3[c], &g_l2[c]) with FALSE; the self-test's
   buffer flushes already used physical+TRUE (correct). This panic was before the "engine online" line, so
   the submit/fence path never ran yet - 0095 CI kernel -> x28 (same sargogpu=1 sargogputest=1) retries it.
+  **x28/x30 (0095-0097): no panic, engine online, but SUBMIT/FENCE FAILED - GPU SMMU translation fault.**
+  Self-test (0096 diagnostics, 0097 halt, IMG_0086/0087): submit 0 (accepted), CP consumed the ring
+  (rptr 15->24 == wptr), but target stayed 0xdeadbeef and the fence stayed 0 (wait: "fence stuck 2 s").
+  Decisive line: `smmu gfsr 0 cbsctlr 0x67 fsr 0x402 far 0x80000000` - the GPU SMMU took a TRANSLATION FAULT
+  (CB_FSR 0x402 = TF) at 0x80000000, our GVA window base = the IB fetch address. Root cause: the engine's
+  L2/L3 page tables were CACHEABLE kmem, but this context bank's walker is NON-cacheable (cb_program sets no
+  TCR IRGN/ORGN) - exactly why the bring-up keeps pt_l1/l2/l3 in the write-combining DMA block. The cacheable
+  descriptors weren't reaching RAM for the walker, so it read zeros -> TF. **Fixed in patch 0098**: pt4k now
+  drops the KMA_ZERO cacheable lines and ml_io_map_wcomb's the table pool (WC); tables are written through the
+  WC alias; the per-table flush_dcache64 calls are dropped and smmu_tlb_flush gets a leading dsb to push the
+  WC writes to RAM before TLBIALL. The self-test's data buffers keep physical+TRUE flushes. 0098 CI -> x31
+  (same args). The 0097 halt works, but the GPU thread runs for seconds (GMU/zap) so launchd output prints
+  alongside the self-test before it freezes; the selftest lines are the last written and readable.
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in

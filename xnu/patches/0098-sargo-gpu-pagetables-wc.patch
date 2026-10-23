@@ -1,0 +1,65 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index b706994..926fa4f 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -112,6 +112,7 @@ static void
+ smmu_tlb_flush(void)
+ {
+ 	uintptr_t cb = (uintptr_t)g_boot.smmu_mmio + 0x8000 + (uintptr_t)g_boot.gpu_cb * 0x1000;
++	__asm__ volatile("dsb sy" ::: "memory");	/* push write-combining table writes to RAM first */
+ 	*(volatile uint32_t *)(cb + 0x618) = 0;		/* TLBIALL */
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	*(volatile uint32_t *)(cb + 0x7f0) = 0;		/* TLBSYNC */
+@@ -138,8 +139,18 @@ pt4k(uint64_t *pa)
+ 		if (p == 0) {
+ 			return NULL;
+ 		}
++		/*
++		 * The GPU SMMU walks these tables non-cacheably (the context bank's
++		 * TCR sets no IRGN/ORGN), like the bring-up's own page tables. Drop
++		 * the cacheable KMA_ZERO lines and use only the write-combining alias
++		 * so descriptor writes reach RAM for the walker with just a dsb.
++		 */
++		flush_dcache64((addr64_t)p, PAGE_SIZE, TRUE);
++		pool_va = (uint8_t *)ml_io_map_wcomb((vm_offset_t)p, PAGE_SIZE);
++		if (pool_va == NULL) {
++			return NULL;
++		}
+ 		pool_pa = p;
+-		pool_va = (uint8_t *)dma;
+ 		pool_left = PAGE_SIZE / 4096;
+ 	}
+ 	unsigned i = PAGE_SIZE / 4096 - pool_left--;
+@@ -156,8 +167,7 @@ vm_init(void)
+ 	if (g_maps == NULL || g_owner == NULL || g_l2 == NULL) {
+ 		return false;
+ 	}
+-	bzero(g_l2, 4096);
+-	flush_dcache64((addr64_t)g_l2, 4096, FALSE);	/* clean the table to PoC for the SMMU walker */
++	bzero(g_l2, 4096);				/* write-combining; the dsb below flushes it */
+ 	g_boot.l1[GVA_L1] = g_l2_pa | 3u;		/* L1[2] -> L2 (table) */
+ 	__asm__ volatile("dsb sy" ::: "memory");	/* l1 is write-combining */
+ 	smmu_tlb_flush();
+@@ -195,10 +205,8 @@ vm_tables(uint32_t first, uint32_t n)
+ 		if (g_l3[c] == NULL) {
+ 			return false;
+ 		}
+-		bzero(g_l3[c], 4096);
+-		flush_dcache64((addr64_t)g_l3[c], 4096, FALSE);
++		bzero(g_l3[c], 4096);			/* write-combining; dsb in smmu_tlb_flush flushes it */
+ 		g_l2[c] = l3pa | 3u;
+-		flush_dcache64((addr64_t)&g_l2[c], 8, FALSE);
+ 	}
+ 	return true;
+ }
+@@ -214,9 +222,7 @@ vm_ptes(uint32_t first, uint32_t n, const uint64_t *pa, bool readonly)
+ 		uint32_t c = (uint32_t)(i / 512);
+ 		g_l3[c][i % 512] = pa ? (pa[i / sub - first] + (i % sub) * 4096) | 3u | attrs : 0;
+ 	}
+-	for (uint64_t c = i0 / 512; c <= (i1 - 1) / 512; c++) {
+-		flush_dcache64((addr64_t)g_l3[c], 4096, FALSE);
+-	}
++	/* g_l3 is write-combining; smmu_tlb_flush's leading dsb pushes these to RAM. */
+ }
+ 
+ uint64_t
