@@ -94,3 +94,34 @@ index 4a1dc73..e1a5d7c 100644
     if (rsc->layout.pitch0 < (prsc->width0 * rsc->layout.cpp) ||
         fd_resource_pitch(rsc, 0) != rsc->layout.pitch0)
        goto fail;
+diff --git a/src/gallium/drivers/freedreno/freedreno_screen.c b/src/gallium/drivers/freedreno/freedreno_screen.c
+index 2428ba6..968c655 100644
+--- a/src/gallium/drivers/freedreno/freedreno_screen.c
++++ b/src/gallium/drivers/freedreno/freedreno_screen.c
+@@ -25,7 +25,10 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include "drm-uapi/drm_fourcc.h"
++#ifndef __APPLE__
+ #include <sys/sysinfo.h>
++#endif
++#include "util/os_misc.h"
+ 
+ #include "freedreno_fence.h"
+ #include "freedreno_perfetto.h"
+@@ -1153,9 +1156,15 @@ fd_screen_create(int fd,
+    screen->driconf.dual_color_blend_by_location =
+          driQueryOptionb(config->options, "dual_color_blend_by_location");
+ 
++#ifdef __APPLE__
++   uint64_t ram_size = 0;
++   os_get_total_physical_memory(&ram_size);
++   screen->ram_size = ram_size;
++#else
+    struct sysinfo si;
+    sysinfo(&si);
+    screen->ram_size = si.totalram;
++#endif
+ 
+    DBG("Pipe Info:");
+    DBG(" GPU-id:          %s", fd_dev_name(screen->dev_id));
