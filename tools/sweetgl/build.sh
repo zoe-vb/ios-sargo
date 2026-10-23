@@ -36,9 +36,11 @@ for f in sweetgl sweet_drm eagl layerdump "$O/dispatch"; do
 	$CC -O2 -Wall -fvisibility=hidden @"$O/mesa-defines.rsp" $INC -I"$H" -c "$src" -o "$O/$(basename "$f").o"
 done
 printf '_sweetgl_init\n_sweetgl_create\n_sweetgl_make_current\n_sweetgl_destroy\n_sweetgl_selftest\n' > "$O/exports.txt"
+# shared-glapi is shared-only in recent Mesa (no static .a); pull its objects in
+GLAPIOBJ=$(find "$B" -path '*shared-glapi*' -name '*.o' 2>/dev/null)
 xcrun -sdk iphoneos clang++ -arch arm64 -miphoneos-version-min=16.0 -dynamiclib -dead_strip \
 	-install_name /usr/lib/sweetgl.dylib -exported_symbols_list "$O/exports.txt" \
-	-o "$O/sweetgl.dylib" "$O/sweetgl.o" "$O/sweet_drm.o" "$O/eagl.o" "$O/layerdump.o" "$O/dispatch.o" $(for l in $LIBS; do echo "$B/$l"; done) \
+	-o "$O/sweetgl.dylib" "$O/sweetgl.o" "$O/sweet_drm.o" "$O/eagl.o" "$O/layerdump.o" "$O/dispatch.o" $GLAPIOBJ $(for l in $LIBS; do echo "$B/$l"; done) \
 	-framework IOKit -framework CoreFoundation -framework IOSurface -framework OpenGLES -framework CoreGraphics -lobjc -lc++ -lz
 codesign -f -s - "$O/sweetgl.dylib"
 SIZE=$(stat -f %z "$O/sweetgl.dylib")
