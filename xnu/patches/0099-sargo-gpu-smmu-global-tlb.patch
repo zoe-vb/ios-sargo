@@ -1,0 +1,43 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 926fa4f..90d74bf 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -111,13 +111,23 @@ emit(uint32_t v)
+ static void
+ smmu_tlb_flush(void)
+ {
+-	uintptr_t cb = (uintptr_t)g_boot.smmu_mmio + 0x8000 + (uintptr_t)g_boot.gpu_cb * 0x1000;
++	uintptr_t base = (uintptr_t)g_boot.smmu_mmio;
++	uintptr_t cb = base + 0x8000 + (uintptr_t)g_boot.gpu_cb * 0x1000;
+ 	__asm__ volatile("dsb sy" ::: "memory");	/* push write-combining table writes to RAM first */
+-	*(volatile uint32_t *)(cb + 0x618) = 0;		/* TLBIALL */
+-	__asm__ volatile("dsb sy" ::: "memory");
+-	*(volatile uint32_t *)(cb + 0x7f0) = 0;		/* TLBSYNC */
++	*(volatile uint32_t *)(cb + 0x618) = 0;		/* CB TLBIALL */
++	*(volatile uint32_t *)(cb + 0x7f0) = 0;		/* CB TLBSYNC */
+ 	for (int i = 0; i < 10000 && (*(volatile uint32_t *)(cb + 0x7f4) & 1u); i++) {
+-		/* wait for TLBSTATUS !active */
++	}
++	/*
++	 * A per-context-bank TLBIALL does not clear the shared walk cache's
++	 * stale "invalid" for a newly added L1 slot (a 0x80000000 translation
++	 * fault persisted after the CB flush). Do a global invalidate too, as
++	 * the downstream SMMU driver (and ios-sailfish) does.
++	 */
++	*(volatile uint32_t *)(base + 0x68) = 0;	/* GR0 TLBIALLNSNH (invalidate all) */
++	*(volatile uint32_t *)(base + 0x70) = 0;	/* GR0 sTLBGSYNC */
++	for (int i = 0; i < 10000 && (*(volatile uint32_t *)(base + 0x74) & 1u); i++) {
++		/* wait for sTLBGSTATUS !active */
+ 	}
+ }
+ 
+@@ -521,6 +531,9 @@ sweet_gpu_selftest(void)
+ 	    se, seqno, we, rptr0, gr(R_CP_RB_RPTR), wptr0, gr(R_CP_RB_WPTR), gr(R_RBBM_STATUS));
+ 	printf("SWEET GPU: selftest: smmu gfsr %#x cbsctlr %#x fsr %#x far %#x/%#x fsynr %#x\n",
+ 	    sr(0x48), sr(cb + 0x0), sr(cb + 0x58), sr(cb + 0x60), sr(cb + 0x64), sr(cb + 0x68));
++	printf("SWEET GPU: selftest: walk l1[2]=%#llx l2[0]=%#llx l3[0]=%#llx (l2pa %#llx)\n",
++	    (unsigned long long)g_boot.l1[GVA_L1], (unsigned long long)g_l2[0],
++	    (unsigned long long)(g_l3[0] ? g_l3[0][0] : 0), (unsigned long long)g_l2_pa);
+ 	printf("SWEET GPU: selftest: target %#x (want %#x) -> %s\n",
+ 	    got, SELFTEST_SENTINEL,
+ 	    se == 0 && we == 0 && got == SELFTEST_SENTINEL ? "SUBMIT/FENCE OK" : "SUBMIT/FENCE FAILED");
