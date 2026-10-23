@@ -298,7 +298,14 @@ static int cb_program(unsigned n)
 	wr(cb + 0x618, 0);				/* TLBIALL */
 	wr(cb + 0x7f0, 0);				/* TLBSYNC */
 	wait_bits(cb + 0x7f4, 1u, 0);
-	wr(cb + 0x00, 0x67u);				/* M, TRE, AFE, CFRE, CFIE */
+	/*
+	 * M, TRE, AFE; no CFRE/CFIE: a faulting GPU access is terminated (read 0,
+	 * write dropped) instead of aborting the GPU. Mesa's texture/vertex fetch
+	 * reads a little past buffer ends - with CFRE that hangs the GPU on the
+	 * first real render. Faults still latch in FSR/FAR (the engine logs them).
+	 * (ios-sailfish 0155.)
+	 */
+	wr(cb + 0x00, 0x07u);
 	DETAIL(con_hex2(" cb", "cbar=", rd(GSMMU_GR1 + 4 * n), "sctlr=", rd(cb)));
 	DETAIL(con_hex2(" cb", "ttbr0=", rd(cb + 0x20), "tcr=", rd(cb + 0x30)));
 	return (rd(cb) & 1u) && rd(cb + 0x20) == (uint32_t)(uintptr_t)pt_l1;
