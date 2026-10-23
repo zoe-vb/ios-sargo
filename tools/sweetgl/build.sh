@@ -14,6 +14,7 @@ export PATH=$R/research/tools/venv/bin:$R/research/tools/bin:$PATH
 # all and let ld's -dead_strip drop whatever sweetgl.dylib does not reference.
 LIBS=$(cd "$B" && ninja -t targets all 2>/dev/null | grep -oE '[^ :]+\.a' | sort -u)
 (cd "$B" && ninja $LIBS)
+mkdir -p "$H/out"
 BRIDGE=$(cd "$B" && echo $LIBS | tr ' ' '\n' | grep 'glapi_bridge\.a' | head -1)
 nm -g "$B/$BRIDGE" > "$H/out/bridge.nm"
 CC="xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0"
