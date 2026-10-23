@@ -1,0 +1,47 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 90d74bf..3e80e52 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -44,9 +44,14 @@ extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ #define CP_EVENT_WRITE		0x46u
+ #define CACHE_FLUSH_TS		(0x04u | (1u << 30))	/* a6xx timestamp event, as cp_test */
+ 
+-/* 1 GiB GPU VA window at 0x80000000 (one L1 entry of the context bank). */
+-#define GVA_BASE		0x80000000ull
+-#define GVA_L1			(GVA_BASE >> 30)		/* L1 index = 2 */
++/*
++ * 1 GiB GPU VA window at 0x00000000 (L1 entry 0, unused by the bring-up).
++ * 0x80000000 translation-faulted even with correct, flushed tables: this
++ * context bank's input range cuts off at 2 GiB, so the window must stay
++ * under it. Page 0 (iova 0) is reserved so a mapping never returns 0.
++ */
++#define GVA_BASE		0x00000000ull
++#define GVA_L1			(GVA_BASE >> 30)		/* L1 index = 0 */
+ #define GVA_CHUNKS		512u				/* 1 GiB / 2 MiB */
+ #define GVA_PAGES		((uint32_t)((1ull << 30) / PAGE_SIZE))
+ #define VM_MAPS			4096u				/* index 0 unused */
+@@ -177,8 +182,10 @@ vm_init(void)
+ 	if (g_maps == NULL || g_owner == NULL || g_l2 == NULL) {
+ 		return false;
+ 	}
++	g_owner[0] = VM_GUARD;				/* reserve page 0 so no mapping gets iova 0 */
++	g_rover = 1;
+ 	bzero(g_l2, 4096);				/* write-combining; the dsb below flushes it */
+-	g_boot.l1[GVA_L1] = g_l2_pa | 3u;		/* L1[2] -> L2 (table) */
++	g_boot.l1[GVA_L1] = g_l2_pa | 3u;		/* L1[0] -> L2 (table) */
+ 	__asm__ volatile("dsb sy" ::: "memory");	/* l1 is write-combining */
+ 	smmu_tlb_flush();
+ 	return true;
+@@ -531,9 +538,9 @@ sweet_gpu_selftest(void)
+ 	    se, seqno, we, rptr0, gr(R_CP_RB_RPTR), wptr0, gr(R_CP_RB_WPTR), gr(R_RBBM_STATUS));
+ 	printf("SWEET GPU: selftest: smmu gfsr %#x cbsctlr %#x fsr %#x far %#x/%#x fsynr %#x\n",
+ 	    sr(0x48), sr(cb + 0x0), sr(cb + 0x58), sr(cb + 0x60), sr(cb + 0x64), sr(cb + 0x68));
+-	printf("SWEET GPU: selftest: walk l1[2]=%#llx l2[0]=%#llx l3[0]=%#llx (l2pa %#llx)\n",
+-	    (unsigned long long)g_boot.l1[GVA_L1], (unsigned long long)g_l2[0],
+-	    (unsigned long long)(g_l3[0] ? g_l3[0][0] : 0), (unsigned long long)g_l2_pa);
++	printf("SWEET GPU: selftest: walk l1[%llu]=%#llx l2[0]=%#llx l3[0]=%#llx tcr %#x\n",
++	    (unsigned long long)GVA_L1, (unsigned long long)g_boot.l1[GVA_L1], (unsigned long long)g_l2[0],
++	    (unsigned long long)(g_l3[0] ? g_l3[0][0] : 0), sr(cb + 0x30));
+ 	printf("SWEET GPU: selftest: target %#x (want %#x) -> %s\n",
+ 	    got, SELFTEST_SENTINEL,
+ 	    se == 0 && we == 0 && got == SELFTEST_SENTINEL ? "SUBMIT/FENCE OK" : "SUBMIT/FENCE FAILED");
