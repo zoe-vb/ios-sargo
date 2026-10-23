@@ -1,0 +1,21 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 8e23a1a..b706994 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -543,6 +543,16 @@ sweet_gpu_engine_online(const struct sweet_gpu_boot *boot)
+ 	int test = 0;
+ 	if (PE_parse_boot_argn("sargogputest", &test, sizeof(test)) && test) {
+ 		sweet_gpu_selftest();
++		/*
++		 * Freeze the console on the self-test output so it can be read:
++		 * mask interrupts and spin. cpus=1, wdt=-1, so nothing else runs
++		 * or prints, and no watchdog resets. Test mode only.
++		 */
++		printf("SWEET GPU: selftest done; halting (sargogputest)\n");
++		(void)ml_set_interrupts_enabled(FALSE);
++		for (;;) {
++			__asm__ volatile("wfi");
++		}
+ 	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
