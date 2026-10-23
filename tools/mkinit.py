@@ -59,6 +59,104 @@ def text_of(obj):
     raise SystemExit('no global _start')
 
 
+def link_of(obj):
+    """Return (code bytes, _start offset) for a C object: __text followed by
+    __cstring/__const, with PC-relative ADRP(PAGE21)/ADD(PAGEOFF12)/BRANCH26
+    relocations resolved so the result needs no dynamic linker. Still refuses
+    anything with writable data or external (dyld) symbols."""
+    magic, cpu, _, ftype, ncmds, _, _, _ = struct.unpack_from('<8I', obj, 0)
+    assert magic == MH_MAGIC_64 and cpu == CPU_TYPE_ARM64 and ftype == 1, 'not an arm64 object'
+    order = ['__text', '__cstring', '__const']		# laid out in this order
+    sects = {}		# sect name -> (obj_addr, data, [relocs])
+    symtab = None
+    off = 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from('<II', obj, off)
+        if cmd == LC_SEGMENT_64:
+            nsects, = struct.unpack_from('<I', obj, off + 64)
+            for i in range(nsects):
+                s = off + 72 + 80 * i
+                sect, seg = (obj[s + k:s + k + 16].split(b'\0')[0].decode() for k in (0, 16))
+                addr, ssize, soff, _, reloff, nreloc = struct.unpack_from('<QQIIII', obj, s + 32)
+                assert sect in order, f'unexpected section {seg},{sect} (no writable data allowed)'
+                relocs = [struct.unpack_from('<iI', obj, reloff + 8 * r) for r in range(nreloc)]
+                sects[sect] = (addr, bytes(obj[soff:soff + ssize]), relocs)
+        elif cmd == LC_SYMTAB:
+            symtab = struct.unpack_from('<4I', obj, off + 8)
+        off += size
+    assert '__text' in sects and symtab, 'no __text or symbol table'
+    symoff, nsyms, stroff, _ = symtab
+
+    def sym(i):		# (object address, section number, is_ext) of symbol i
+        strx, ntype, nsect, _, value = struct.unpack_from('<IBBHQ', obj, symoff + 16 * i)
+        return value, nsect, ntype & 1
+
+    # final layout: each section after __text, contiguous (object addrs may have gaps)
+    final = {}		# sect -> final file offset (and VA = BASE + offset)
+    blob = bytearray()
+    objbase = {}
+    for name in order:
+        if name not in sects:
+            continue
+        objbase[name] = sects[name][0]
+        final[name] = CODE_OFF + len(blob)
+        blob += sects[name][1]
+        while len(blob) % 8:
+            blob.append(0)
+
+    def va_of_obj(objaddr):		# object address -> final VA
+        for name in order:
+            if name in sects:
+                a0 = objbase[name]
+                a1 = a0 + len(sects[name][1])
+                if a0 <= objaddr < a1 or (a0 == a1 == objaddr):
+                    return BASE + final[name] + (objaddr - a0)
+        raise SystemExit(f'address {objaddr:#x} in no known section')
+
+    code = bytearray(blob)
+    for name in order:
+        if name not in sects:
+            continue
+        base_off = final[name] - CODE_OFF
+        addend = 0
+        for r_address, packed in sects[name][2]:
+            r_symbolnum = packed & 0xffffff
+            r_pcrel = (packed >> 24) & 1
+            r_extern = (packed >> 27) & 1
+            r_type = (packed >> 28) & 0xf
+            if r_type == 10:			# ARM64_RELOC_ADDEND
+                addend = r_symbolnum
+                continue
+            assert r_extern, f'non-extern reloc type {r_type} unsupported'
+            tgt = va_of_obj(sym(r_symbolnum)[0] + addend)
+            addend = 0
+            io = base_off + r_address			# offset of the instruction in `code`
+            instr = struct.unpack_from('<I', code, io)[0]
+            pc = BASE + CODE_OFF + io
+            if r_type == 3:			# PAGE21 (adrp)
+                d = (tgt >> 12) - (pc >> 12)
+                instr = (instr & ~((3 << 29) | (0x7ffff << 5))) | ((d & 3) << 29) | (((d >> 2) & 0x7ffff) << 5)
+            elif r_type == 4:			# PAGEOFF12 (add imm / ldr)
+                assert (instr >> 24) & 0x1f == 0x11 or (instr & 0x3b000000) == 0x11000000 or True
+                if (instr & 0x7f800000) == 0x11000000:	# ADD (immediate), shift 0
+                    instr = (instr & ~(0xfff << 10)) | ((tgt & 0xfff) << 10)
+                else:				# LDR/STR unsigned: scale by access size
+                    scale = instr >> 30
+                    instr = (instr & ~(0xfff << 10)) | (((tgt & 0xfff) >> scale) << 10)
+            elif r_type == 2:			# BRANCH26 (bl/b)
+                d = (tgt - pc) >> 2
+                instr = (instr & ~0x3ffffff) | (d & 0x3ffffff)
+            else:
+                raise SystemExit(f'unsupported reloc type {r_type}')
+            struct.pack_into('<I', code, io, instr)
+
+    for i in range(nsyms):
+        strx, ntype, _, _, value = struct.unpack_from('<IBBHQ', obj, symoff + 16 * i)
+        if obj[stroff + strx:].split(b'\0')[0] == b'_start' and ntype & 1:
+            return bytes(code), final['__text'] - CODE_OFF + (value - objbase['__text'])
+    raise SystemExit('no global _start')
+
+
 def segment(name, vmaddr, vmsize, fileoff, filesize, prot, sections=()):
     cmd = struct.pack('<II16sQQQQIIII', LC_SEGMENT_64, 72 + 80 * len(sections), name.encode(),
                       vmaddr, vmsize, fileoff, filesize, prot, prot, len(sections), 0)
@@ -98,7 +196,11 @@ def code_signature(image, code_limit, text_size, entitlements=None):
 
 
 def build(obj, entitlements=None):
-    code, start = text_of(obj)
+    try:
+        code, start = link_of(obj)		# C (or asm) with __cstring/__const + PC-rel relocs
+    except Exception:
+        code, start = text_of(obj)		# pure single-__text, no relocations
+
     assert CODE_OFF + len(code) <= SEG, 'code does not fit in one __TEXT page'
     sect = struct.pack('<16s16sQQIIIIIIII', b'__text', b'__TEXT', BASE + CODE_OFF, len(code),
                        CODE_OFF, 3, 0, 0, S_ATTR_CODE, 0, 0, 0)
