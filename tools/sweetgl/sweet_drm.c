@@ -527,3 +527,4 @@ int drmSyncobjWait(int fd, uint32_t *h, unsigned n, int64_t t, unsigned f, uint3
 { (void)fd; (void)h; (void)n; (void)t; (void)f; (void)s; return -ENOSYS; }
 int drmSyncobjTimelineWait(int fd, uint32_t *h, uint64_t *p, unsigned n, int64_t t, unsigned f, uint32_t *s)
 { (void)fd; (void)h; (void)p; (void)n; (void)t; (void)f; (void)s; return -ENOSYS; }
+int drmSyncobjSignal(int fd, const uint32_t *h, uint32_t n) { (void)fd; (void)h; (void)n; return -ENOSYS; }

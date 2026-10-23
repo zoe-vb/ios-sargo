@@ -43,6 +43,7 @@ int drmSyncobjFDToHandle(int fd, int obj_fd, uint32_t *handle);
 int drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd);
 int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
 int drmSyncobjReset(int fd, const uint32_t *handles, uint32_t handle_count);
+int drmSyncobjSignal(int fd, const uint32_t *handles, uint32_t handle_count);
 int drmSyncobjWait(int fd, uint32_t *handles, unsigned num_handles, int64_t timeout_nsec,
     unsigned flags, uint32_t *first_signaled);
 int drmSyncobjTimelineWait(int fd, uint32_t *handles, uint64_t *points, unsigned num_handles,
