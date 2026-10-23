@@ -67,8 +67,16 @@ def launchd(root):
     removed = [k for k, j in jobs.items() if j.get('Label') == 'com.apple.CommCenter']
     for k in removed:
         del jobs[k]
+    # Load sweetgl.dylib (Mesa freedreno GLES, /usr/lib/sweetgl.dylib) into
+    # backboardd so CoreAnimation renders through the GPU. Our kernel has no
+    # sweetenv boot-arg, so inject DYLD_INSERT_LIBRARIES via the launchd job.
+    bb = [j for j in jobs.values() if j.get('Label') == 'com.apple.backboardd']
+    for job in bb:
+        env = job.setdefault('EnvironmentVariables', {})
+        env['DYLD_INSERT_LIBRARIES'] = '/usr/lib/sweetgl.dylib'
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
-    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
+    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed, '
+          f'{len(bb)} backboardd DYLD_INSERT set')
 
 
 def containers(root):
