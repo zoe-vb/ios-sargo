@@ -66,8 +66,9 @@ def link_of(obj):
     anything with writable data or external (dyld) symbols."""
     magic, cpu, _, ftype, ncmds, _, _, _ = struct.unpack_from('<8I', obj, 0)
     assert magic == MH_MAGIC_64 and cpu == CPU_TYPE_ARM64 and ftype == 1, 'not an arm64 object'
-    order = ['__text', '__cstring', '__const']		# laid out in this order
-    sects = {}		# sect name -> (obj_addr, data, [relocs])
+    # read-only sections clang emits, laid out in this order after __text
+    order = ['__text', '__cstring', '__const', '__literal4', '__literal8', '__literal16']
+    sects = {}		# sect name -> (obj_addr, data, [relocs], align_exp)
     symtab = None
     off = 32
     for _ in range(ncmds):
@@ -77,10 +78,10 @@ def link_of(obj):
             for i in range(nsects):
                 s = off + 72 + 80 * i
                 sect, seg = (obj[s + k:s + k + 16].split(b'\0')[0].decode() for k in (0, 16))
-                addr, ssize, soff, _, reloff, nreloc = struct.unpack_from('<QQIIII', obj, s + 32)
+                addr, ssize, soff, align, reloff, nreloc = struct.unpack_from('<QQIIII', obj, s + 32)
                 assert sect in order, f'unexpected section {seg},{sect} (no writable data allowed)'
                 relocs = [struct.unpack_from('<iI', obj, reloff + 8 * r) for r in range(nreloc)]
-                sects[sect] = (addr, bytes(obj[soff:soff + ssize]), relocs)
+                sects[sect] = (addr, bytes(obj[soff:soff + ssize]), relocs, align)
         elif cmd == LC_SYMTAB:
             symtab = struct.unpack_from('<4I', obj, off + 8)
         off += size
@@ -98,6 +99,9 @@ def link_of(obj):
     for name in order:
         if name not in sects:
             continue
+        a = max(8, 1 << sects[name][3])			# honour the section's alignment
+        while (CODE_OFF + len(blob)) % a:
+            blob.append(0)
         objbase[name] = sects[name][0]
         final[name] = CODE_OFF + len(blob)
         blob += sects[name][1]
