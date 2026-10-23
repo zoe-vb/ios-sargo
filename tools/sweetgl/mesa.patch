@@ -56,9 +56,18 @@ index d4e8fd5..cb8ea68 100644
  
  void
 diff --git a/src/freedreno/meson.build b/src/freedreno/meson.build
-index 29e1bc4..29e780d 100644
+index 29e1bc4..d7c51ba 100644
 --- a/src/freedreno/meson.build
 +++ b/src/freedreno/meson.build
+@@ -9,7 +9,7 @@ rnn_install_path = get_option('datadir') + '/freedreno/registers'
+ rnn_path = rnn_src_path + ':' + get_option('prefix') + '/' + rnn_install_path
+ 
+ dep_libarchive = dependency('libarchive', allow_fallback: true, required: false)
+-dep_libxml2 = dependency('libxml-2.0', allow_fallback: true, required: false)
++dep_libxml2 = dependency('libxml-2.0', allow_fallback: false, required: false)
+ prog_gzip = find_program('gzip', required: false)
+ 
+ install_fd_decode_tools = dep_libxml2.found() and prog_gzip.found() and \
 @@ -22,7 +22,7 @@ subdir('ir2')
  subdir('ir3')
  subdir('fdl')
