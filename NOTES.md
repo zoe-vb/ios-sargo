@@ -74,6 +74,31 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   Plan: GLES via Mesa freedreno like joranv1/ios-sailfish. **Author OK'd code reuse (owner relayed
   2026-10-22); transplanted files carry a "Transplanted (with permission) from ios-sailfish" header.
   Add a LICENSE/NOTICE entry crediting ios-sailfish when the userland (Mesa shim/EAGL) lands.**
+  **0092 TESTED ON DEVICE (x26, 2026-10-23): no regression.** x26 = 0092 CI kernel
+  (xnu-kernel.zip -> xnu-kernel-0092/, SHA256 OK) + x25 cmdline/ADT (sargo-x13.adt) + the four GPU
+  blobs, `shim/out/sargo/shim-boot-x26.img` (payload-x26.bin). fastboot boot -> Booting OKAY, and it
+  did NOT hang through the GPU bring-up + engine_online + SweetGPU service start (a fault has always
+  shown as a hang here, so a clean boot past it = the new kernel-side GPU stack runs without faulting).
+  Console scrolls too fast to photograph the individual "engine online"/"SweetGPU registered" lines.
+  GET_PARAM not exercised yet (needs a userland tool, lands with the submit path).
+  **GPU->USERLAND milestone 1, increment 2 - patch 0093 (WRITTEN, not built/tested): the live engine.**
+  bsd/dev/sweet_gpu.{h,c} rewritten from the 0092 stub into a real engine; the bring-up now hands it a
+  struct sweet_gpu_boot (ring, gfx3d_user L1 table + pa, GPU/SMMU register windows, fence u32 + iova)
+  via sweet_gpu_engine_online(&boot) at the ZAP "SECURE MODE OFF" point (shim/gpu.c SWEET_GPU_ENGINE
+  block, XNU-only; gpu2xnu.py now #includes sweet_gpu.h). Engine: GPU VA window = 1 GiB at 0x80000000
+  in the context bank (L1[2]->one L2->L3, 4 KiB pages, page-granular + guard page) - kept inside 32 bits
+  because cb_program sets T0SZ 32; widen T0SZ to lift GVA_BASE to 0x200000000 later. submit = IBs chained
+  with CP_INDIRECT_BUFFER_PFE then CACHE_FLUSH_TS (0x04|1<<30, as cp_test) to the fence; wait polls the
+  fence (WC alias). SweetGPU.cpp user client: sel 10 bo new (IOBufferMemoryDescriptor, contiguous+wired,
+  vm_map'd, mmap via clientMemoryForType), 11 bo free, 13 submit (IB ranges checked against this client's
+  bos, caches flushed around it), 14 wait, 15 info; 12 import (IOSurface) + 16 cpu-fini still unsupported.
+  Buffers kept cacheable; the client clean+invalidates all its bos around submit/wait (simplicity; WC
+  later). Patch verified to apply on the 0089-0092 tree; sweet_gpu.c (C) and SweetGPU.cpp (C++) pass clang
+  -fsyntax-only against stubs; shim still builds GPU=zap. Fence packet (CACHE_FLUSH_TS) not yet confirmed
+  to write on sargo (cp_test's blit was inconclusive under secure mode) - first thing to watch on device.
+  Next: build 0093 CI kernel -> x27, write a tiny userland tool (open SweetGPU, bo_new a cmd buf + a
+  target bo, IB = CP_MEM_WRITE a sentinel to the target, submit, wait, read it back) to prove the path,
+  then patch 0094 = IOSurface import + Mesa freedreno (milestone 2).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in

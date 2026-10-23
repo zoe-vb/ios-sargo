@@ -242,6 +242,7 @@ static uint8_t gpu_mem[0x10000] __attribute__((aligned(4096)));
 #define GPU_IOVA	(GMU_IOVA + 0x100000)	/* same L3 table, entries 256.. */
 #define GPU_RING	0x8000			/* offsets in gpu_mem */
 #define GPU_TARGET	0x9000
+#define GPU_FENCE	0x9080			/* SweetGPU engine fence u32 (XNU, SWEET_GPU_ENGINE) */
 #ifdef GPU_BLIT
 #define BLIT_W		64u
 #define BLIT_H		64u
@@ -1299,9 +1300,32 @@ static void cp_test(void)
 	con_hex2(" trust", "now=", gpu_r(0xf400), "int0=", gpu_r(RBBM_INT_0_STATUS));
 	con_str("ZAP", gpu_r(0xf400) == 0 && got == 0x5ec0ff15u ? "SECURE MODE OFF, GPU STILL RUNS" : "secure mode not left");
 #ifdef SWEET_GPU_ENGINE
-	/* hand the live Adreno 615 to the SweetGPU IOKit engine (bsd/dev/sweet_gpu.c) */
-	if (gpu_r(0xf400) == 0 && got == 0x5ec0ff15u)
-		sweet_gpu_engine_online(0x06010500u, 0x100000u, 0x80000u);
+	/*
+	 * Hand the live Adreno 615 to the SweetGPU IOKit engine
+	 * (bsd/dev/sweet_gpu.c): the ring, the gfx3d_user context bank's L1
+	 * table, the GPU/SMMU register windows and a fence u32. This block is
+	 * XNU-only (the shim never defines SWEET_GPU_ENGINE), so it uses the
+	 * generated driver's physical/mapped symbols directly.
+	 */
+	if (gpu_r(0xf400) == 0 && got == 0x5ec0ff15u) {
+		struct sweet_gpu_boot boot = {
+			.chip_id = 0x06010500u,
+			.gmem_size = 0x80000u,
+			.gmem_base = 0x100000u,
+			.gpu_mmio = (volatile uint32_t *)io_va(GPU),
+			.smmu_mmio = (volatile uint32_t *)io_va(GSMMU),
+			.l1 = pt_l1,
+			.l1_pa = pt_l1_pa,
+			.gpu_cb = GPU_CB,
+			.ring = (uint32_t *)(gpu_mem + GPU_RING),
+			.ring_pa = gpu_mem_pa + GPU_RING,
+			.ring_iova = GPU_IOVA + GPU_RING,
+			.ring_dwords = 1024u,
+			.fence = (volatile uint32_t *)(gpu_mem + GPU_FENCE),
+			.fence_iova = GPU_IOVA + GPU_FENCE,
+		};
+		sweet_gpu_engine_online(&boot);
+	}
 #endif
 #endif
 #ifdef GPU_TRUST
