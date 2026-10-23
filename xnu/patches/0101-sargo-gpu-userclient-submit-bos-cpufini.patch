@@ -1,0 +1,62 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index 3cc3e7f..f28f465 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -66,7 +66,7 @@ struct sweet_gpu_bo {
+ 
+ struct sweet_submit_hdr {
+ 	uint32_t nr_ibs;
+-	uint32_t flags;
++	uint32_t nr_bos;	/* residency list of bo handles follows the IBs (Mesa/sweet_drm) */
+ };
+ 
+ class SweetGPUUserClient : public IOUserClient {
+@@ -269,7 +269,8 @@ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 		struct sweet_submit_hdr hdr;
+ 		memcpy(&hdr, args->structureInput, sizeof(hdr));
+ 		if (hdr.nr_ibs == 0 || hdr.nr_ibs > SWEET_GPU_MAX_IBS ||
+-		    args->structureInputSize != sizeof(hdr) + (size_t)hdr.nr_ibs * sizeof(struct sweet_gpu_ib)) {
++		    args->structureInputSize != sizeof(hdr) + (size_t)hdr.nr_ibs * sizeof(struct sweet_gpu_ib)
++		    + (size_t)hdr.nr_bos * sizeof(uint32_t)) {
+ 			break;
+ 		}
+ 		if (args->scalarOutputCount < 1) {
+@@ -277,11 +278,15 @@ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 		}
+ 		const struct sweet_gpu_ib *ib =
+ 		    (const struct sweet_gpu_ib *)((const uint8_t *)args->structureInput + sizeof(hdr));
++		const uint32_t *resident = (const uint32_t *)(ib + hdr.nr_ibs);	/* bo handles */
+ 		IOLockLock(fLock);
+ 		bool owned = true;
+ 		for (uint32_t i = 0; i < hdr.nr_ibs && owned; i++) {
+ 			owned = ownsRange(ib[i].iova, (uint64_t)ib[i].dwords * 4);
+ 		}
++		for (uint32_t i = 0; i < hdr.nr_bos && owned; i++) {	/* every referenced bo must be live */
++			owned = resident[i] < SWEET_GPU_MAX_BOS && fBos[resident[i]].md != NULL;
++		}
+ 		if (!owned) {
+ 			IOLockUnlock(fLock);
+ 			ret = kIOReturnNotPermitted;
+@@ -331,8 +336,20 @@ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 		ret = kIOReturnSuccess;
+ 		break;
+ 	}
+-	case 12:			/* bo import (IOSurface): next patch */
+-	case 16:			/* bo cpu-fini: next patch */
++	case 16:			/* bo cpu-fini: clean+invalidate so CPU/GPU see each other */
++		if (args->scalarInputCount == 1 && args->scalarInput[0] < SWEET_GPU_MAX_BOS) {
++			IOLockLock(fLock);
++			struct sweet_gpu_bo *b = &fBos[(unsigned)args->scalarInput[0]];
++			if (b->md != NULL) {
++				flush_dcache64((addr64_t)b->pa, (unsigned)b->size, TRUE);
++				ret = kIOReturnSuccess;
++			} else {
++				ret = kIOReturnNotFound;
++			}
++			IOLockUnlock(fLock);
++		}
++		break;
++	case 12:			/* bo import (IOSurface): wired when presentation lands */
+ 		ret = kIOReturnUnsupported;
+ 		break;
+ 	default:
