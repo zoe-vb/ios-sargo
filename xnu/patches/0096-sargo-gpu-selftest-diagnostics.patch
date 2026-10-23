@@ -1,0 +1,56 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index bcc9532..8e23a1a 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -464,6 +464,13 @@ selftest_page(uint64_t *pa, void **va)
+ 	return p;
+ }
+ 
++/* GPU SMMU register read (byte offset from the window base). */
++static uint32_t
++sr(uintptr_t off)
++{
++	return *(volatile uint32_t *)((uintptr_t)g_boot.smmu_mmio + off);
++}
++
+ static void
+ sweet_gpu_selftest(void)
+ {
+@@ -475,8 +482,12 @@ sweet_gpu_selftest(void)
+ 	}
+ 	uint64_t cmd_iova = sweet_gpu_vm_map(&cmd_pa, 1, false);
+ 	uint64_t tgt_iova = sweet_gpu_vm_map(&tgt_pa, 1, false);
++	printf("SWEET GPU: selftest: cmd iova %#llx (pa %#llx), tgt iova %#llx (pa %#llx)\n",
++	    cmd_iova, cmd_pa, tgt_iova, tgt_pa);
++	printf("SWEET GPU: selftest: vm_range cmd=%d tgt=%d; l1[2]=%#llx\n",
++	    sweet_gpu_vm_range(cmd_iova, 16), sweet_gpu_vm_range(tgt_iova, 4),
++	    cmd_iova ? g_boot.l1[GVA_L1] : 0);
+ 	if (cmd_iova == 0 || tgt_iova == 0) {
+-		printf("SWEET GPU: selftest: vm_map failed (cmd %#llx, tgt %#llx)\n", cmd_iova, tgt_iova);
+ 		return;
+ 	}
+ 	volatile uint32_t *tgt = (volatile uint32_t *)tgt_va;
+@@ -491,14 +502,21 @@ sweet_gpu_selftest(void)
+ 	ib[k++] = SELFTEST_SENTINEL;
+ 	flush_dcache64((addr64_t)cmd_pa, PAGE_SIZE, TRUE);	/* GPU reads the IB from RAM */
+ 
++	uint32_t rptr0 = gr(R_CP_RB_RPTR), wptr0 = gr(R_CP_RB_WPTR);
+ 	struct sweet_gpu_ib sib = { .iova = cmd_iova, .dwords = k };
+ 	uint32_t seqno = 0;
+ 	int se = sweet_gpu_submit(&sib, 1, &seqno);
+ 	int we = se == 0 ? sweet_gpu_wait(seqno, 2000) : se;
+ 	flush_dcache64((addr64_t)tgt_pa, PAGE_SIZE, TRUE);	/* see the GPU's write */
+ 	uint32_t got = tgt[0];
+-	printf("SWEET GPU: selftest: submit %d seq %u, wait %d, target %#x (want %#x) -> %s\n",
+-	    se, seqno, we, got, SELFTEST_SENTINEL,
++	uintptr_t cb = 0x8000u + (uintptr_t)g_boot.gpu_cb * 0x1000u;
++
++	printf("SWEET GPU: selftest: submit %d seq %u wait %d; rptr %u->%u wptr %u->%u rbbm %#x\n",
++	    se, seqno, we, rptr0, gr(R_CP_RB_RPTR), wptr0, gr(R_CP_RB_WPTR), gr(R_RBBM_STATUS));
++	printf("SWEET GPU: selftest: smmu gfsr %#x cbsctlr %#x fsr %#x far %#x/%#x fsynr %#x\n",
++	    sr(0x48), sr(cb + 0x0), sr(cb + 0x58), sr(cb + 0x60), sr(cb + 0x64), sr(cb + 0x68));
++	printf("SWEET GPU: selftest: target %#x (want %#x) -> %s\n",
++	    got, SELFTEST_SENTINEL,
+ 	    se == 0 && we == 0 && got == SELFTEST_SENTINEL ? "SUBMIT/FENCE OK" : "SUBMIT/FENCE FAILED");
+ 
+ 	sweet_gpu_vm_unmap(cmd_iova);
