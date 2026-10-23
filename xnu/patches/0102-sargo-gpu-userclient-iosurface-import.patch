@@ -1,0 +1,98 @@
+diff --git a/iokit/Kernel/arm/SweetGPU.cpp b/iokit/Kernel/arm/SweetGPU.cpp
+index f28f465..cdf2bef 100644
+--- a/iokit/Kernel/arm/SweetGPU.cpp
++++ b/iokit/Kernel/arm/SweetGPU.cpp
+@@ -33,6 +33,7 @@ extern "C" {
+ #include "../../../bsd/dev/sweet_gpu.h"
+ void flush_dcache64(addr64_t addr, unsigned length, boolean_t phys);
+ }
++#include "SweetSurface.h"	/* sweet_surface_copy() for IOSurface import (sel 12) */
+ 
+ #define SWEET_GPU_MAX_BOS	256
+ #define SWEET_GPU_MAX_BO_BYTES	(64ull << 20)
+@@ -58,7 +59,8 @@ SweetGPU::start(IOService *provider)
+ }
+ 
+ struct sweet_gpu_bo {
+-	IOBufferMemoryDescriptor *md;	/* NULL: free slot */
++	IOMemoryDescriptor *md;		/* NULL: free slot */
++	OSObject *surface;		/* retained SweetSurface for imports, else NULL */
+ 	uint64_t iova;			/* GPU VA */
+ 	uint64_t pa;			/* physical base (contiguous) */
+ 	uint64_t size;
+@@ -113,6 +115,7 @@ SweetGPUUserClient::freeSlot(unsigned i)
+ 	sweet_gpu_vm_unmap(b->iova);
+ 	b->md->complete();
+ 	b->md->release();
++	OSSafeReleaseNULL(b->surface);
+ 	bzero(b, sizeof(*b));
+ }
+ 
+@@ -349,9 +352,65 @@ SweetGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 			IOLockUnlock(fLock);
+ 		}
+ 		break;
+-	case 12:			/* bo import (IOSurface): wired when presentation lands */
+-		ret = kIOReturnUnsupported;
++	case 12: {			/* bo import (IOSurface): map its memory into GPU VA */
++		if (args->scalarInputCount != 1 || args->scalarOutputCount < 3) {
++			break;
++		}
++		SweetSurface *s = sweet_surface_copy((uint32_t)args->scalarInput[0]);
++		if (s == NULL || s->memory == NULL) {
++			OSSafeReleaseNULL(s);
++			ret = kIOReturnNotFound;
++			break;
++		}
++		IOMemoryDescriptor *md = s->memory;
++		md->retain();
++		if (md->prepare(kIODirectionInOut) != kIOReturnSuccess) {
++			md->release();
++			s->release();
++			ret = kIOReturnVMError;
++			break;
++		}
++		uint64_t size = md->getLength();
++		uint32_t npages = (uint32_t)(size / PAGE_SIZE);
++		uint64_t *pa = (size != 0 && (size & PAGE_MASK) == 0 && size <= SWEET_GPU_MAX_BO_BYTES) ?
++		    (uint64_t *)IOMallocData(npages * sizeof(uint64_t)) : NULL;
++		IOByteCount seg = 0;
++		uint64_t base = pa ? md->getPhysicalSegment(0, &seg, kIOMemoryMapperNone) : 0;
++		bool ok = pa != NULL && base != 0 && (base & PAGE_MASK) == 0 && seg >= size;
++		for (uint32_t p = 0; ok && p < npages; p++) {
++			pa[p] = base + (uint64_t)p * PAGE_SIZE;		/* surface memory is contiguous */
++		}
++		uint64_t iova = ok ? sweet_gpu_vm_map(pa, npages, false) : 0;
++		if (pa != NULL) {
++			IOFreeData(pa, npages * sizeof(uint64_t));
++		}
++		IOLockLock(fLock);
++		unsigned slot = SWEET_GPU_MAX_BOS;
++		for (unsigned i = 0; i < SWEET_GPU_MAX_BOS && slot == SWEET_GPU_MAX_BOS; i++) {
++			if (fBos[i].md == NULL) {
++				slot = i;
++			}
++		}
++		if (iova == 0 || slot == SWEET_GPU_MAX_BOS) {
++			IOLockUnlock(fLock);
++			if (iova != 0) {
++				sweet_gpu_vm_unmap(iova);
++			}
++			md->complete();
++			md->release();
++			s->release();
++			ret = kIOReturnNoResources;
++			break;
++		}
++		fBos[slot] = (struct sweet_gpu_bo){ .md = md, .surface = s, .iova = iova, .pa = base, .size = size };
++		IOLockUnlock(fLock);
++		args->scalarOutput[0] = slot;
++		args->scalarOutput[1] = iova;
++		args->scalarOutput[2] = size;
++		args->scalarOutputCount = 3;
++		ret = kIOReturnSuccess;
+ 		break;
++	}
+ 	default:
+ 		ret = kIOReturnBadArgument;
+ 		break;
