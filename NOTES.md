@@ -135,6 +135,20 @@ Plan, hardware facts and phone steps: `docs/SARGO.md`. The user has an unlocked 
   WC writes to RAM before TLBIALL. The self-test's data buffers keep physical+TRUE flushes. 0098 CI -> x31
   (same args). The 0097 halt works, but the GPU thread runs for seconds (GMU/zap) so launchd output prints
   alongside the self-test before it freezes; the selftest lines are the last written and readable.
+  **MILESTONE 2026-10-23: GPU SUBMIT/FENCE WORKS ON SARGO (x33, patch 0100).** Self-test printed
+  `target 0x5eed600d -> SUBMIT/FENCE OK`: the Adreno 615 fetched the command buffer from the engine's GPU
+  VA window, ran CP_MEM_WRITE, wrote the sentinel into the target buffer, and CACHE_FLUSH_TS signaled the
+  fence - the whole sweet_gpu_submit/wait path (patch 0093) proven end-to-end in iOS. CACHE_FLUSH_TS DOES
+  write the fence on a6xx (the open question - resolved). ROOT CAUSE of the x28-x32 failures: the gfx3d_user
+  context bank's input-address range stops at 2 GiB, so the first window at 0x80000000 translation-faulted
+  (CB_FSR 0x402) despite correct, write-combining, globally-TLB-flushed page tables; moving the 1 GiB window
+  to L1[0] (0x00000000-0x40000000, patch 0100, iova 0 reserved) fixed it. Fix chain beyond 0093: 0095
+  flush_dcache64 by VA not physical (panic); 0098 page tables in write-combining memory; 0099 global SMMU
+  TLB invalidate (TLBIALLNSNH); 0100 window under 2 GiB. 0096 added self-test diagnostics, 0097 halts after
+  it (sargogputest=1). Reusable: the kernel GPU stack (0092 service+user client, 0093 engine, 0095-0100
+  fixes) and tools/sweetgpu-test. Window is 1 GiB at 0x0 (grow within the 2 GiB input limit later; the TCR
+  readout on x33 shows the actual input size). Next: prove the IOKit user-client ABI from user space
+  (ramdisk-init sweetgpu-test, no rootfs reflash), IOSurface import (sel 12), then Mesa freedreno (milestone 2).
 - Done (branch `sargo-port`, not booted yet): `shim/board.h` (BOARD=sweet|sargo, sweet default and
   unchanged apart from reading the IMEM restart-reason address from the live FDT, falling back to the
   old constant), generic `fdt_prop()` lookup, sargo stage-1 bring-up screen (`board_bringup()` in
